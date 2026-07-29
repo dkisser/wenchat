@@ -4,6 +4,8 @@ import type { AddressInfo } from "node:net";
 export type SdpPayload = {
 	type: string;
 	sdp: string;
+	signalingHost?: string;
+	signalingPort?: number;
 };
 
 export type IceCandidatePayload = {

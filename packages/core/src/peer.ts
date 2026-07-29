@@ -19,6 +19,8 @@ export class PeerConnection {
 	private remoteHost?: string;
 	private remotePort?: number;
 
+	private localSignalingHost = "127.0.0.1";
+
 	constructor() {
 		this.pc = new RTCPeerConnection({
 			iceServers: [],
@@ -46,7 +48,8 @@ export class PeerConnection {
 		};
 	}
 
-	async startListening(signalingPort: number): Promise<void> {
+	async startListening(signalingPort: number, signalingHost = "127.0.0.1"): Promise<void> {
+		this.localSignalingHost = signalingHost;
 		await this.signaling.start(signalingPort);
 		this.signaling.onOffer(async (offer) => {
 			return this.acceptOffer(offer);
@@ -54,6 +57,10 @@ export class PeerConnection {
 		this.signaling.onCandidate((candidate) => {
 			this.addIceCandidate(candidate);
 		});
+	}
+
+	getSignalingPort(): number {
+		return this.signaling.getPort();
 	}
 
 	async connect(peerHost: string, peerPort: number): Promise<void> {
@@ -69,6 +76,8 @@ export class PeerConnection {
 		const answer = await this.signaling.sendOffer(peerHost, peerPort, {
 			type: "offer",
 			sdp: offer.sdp,
+			signalingHost: this.localSignalingHost,
+			signalingPort: this.signaling.getPort(),
 		});
 
 		await this.pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
@@ -80,6 +89,11 @@ export class PeerConnection {
 	}
 
 	async acceptOffer(offer: SdpPayload): Promise<SdpPayload> {
+		if (offer.signalingHost && offer.signalingPort) {
+			this.remoteHost = offer.signalingHost;
+			this.remotePort = offer.signalingPort;
+		}
+
 		await this.pc.setRemoteDescription({ type: "offer", sdp: offer.sdp });
 		const answer = await this.pc.createAnswer();
 		await this.pc.setLocalDescription(answer);
