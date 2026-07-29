@@ -1,0 +1,20 @@
+{
+	"name": "wenchat",
+	"private": true,
+	"version": "0.1.0",
+	"workspaces": ["apps/*", "packages/*"],
+	"scripts": {
+		"build": "bun run --filter '*' build",
+		"test": "bun test",
+		"lint": "biome check .",
+		"format": "biome format --write .",
+		"cli": "bun run apps/cli/src/main.tsx"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^1.8.3",
+		"typescript": "^5.5.0"
+	},
+	"engines": {
+		"node": ">=20.0.0"
+	}
+}

@@ -1,0 +1,24 @@
+{
+	"name": "@wenchat/cli",
+	"version": "0.1.0",
+	"type": "module",
+	"scripts": {
+		"dev": "node --loader ts-node/esm src/main.tsx",
+		"build": "tsc",
+		"start": "node dist/main.js"
+	},
+	"dependencies": {
+		"@wenchat/core": "workspace:*",
+		"@wenchat/protocol": "workspace:*",
+		"@wenchat/ui": "workspace:*",
+		"ink": "^5.0.0",
+		"react": "^18.3.0",
+		"pino": "^9.3.0"
+	},
+	"devDependencies": {
+		"@types/node": "^20.0.0",
+		"@types/react": "^18.3.0",
+		"ts-node": "^10.9.0",
+		"typescript": "^5.5.0"
+	}
+}
