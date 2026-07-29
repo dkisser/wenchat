@@ -2,10 +2,10 @@
 	"name": "@wenchat/protocol",
 	"version": "0.1.0",
 	"type": "module",
-	"main": "./src/message.ts",
-	"types": "./src/message.ts",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
 	"exports": {
-		".": "./src/message.ts"
+		".": "./src/index.ts"
 	},
 	"scripts": {
 		"test": "bun test",
