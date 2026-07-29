@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { Message, TextMessage } from "./message.ts";
+import type { Message, TextMessage } from "./message";
 
 describe("message types", () => {
 	it("text message has required fields", () => {

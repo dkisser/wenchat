@@ -1,11 +1,15 @@
-import { decode, encode, type Message } from "@wenchat/protocol";
-import { RTCPeerConnection } from "werift";
+import { type Message } from "@wenchat/protocol";
+import {
+	RTCPeerConnection,
+	type RTCDataChannel,
+	RTCIceCandidate,
+} from "werift";
 import {
 	SignalingServer,
 	type IceCandidatePayload,
 	type SdpPayload,
-} from "./signaling.ts";
-import { DataTransport } from "./transport.ts";
+} from "./signaling";
+import { DataTransport } from "./transport";
 
 const DATA_CHANNEL_LABEL = "wenchat";
 
@@ -145,11 +149,13 @@ export class PeerConnection {
 			this.pendingCandidates = [...this.pendingCandidates, candidate];
 			return;
 		}
-		await this.pc.addIceCandidate({
-			candidate: candidate.candidate,
-			sdpMid: candidate.sdpMid,
-			sdpMLineIndex: candidate.sdpMLineIndex,
-		});
+		await this.pc.addIceCandidate(
+			new RTCIceCandidate({
+				candidate: candidate.candidate,
+				sdpMid: candidate.sdpMid,
+				sdpMLineIndex: candidate.sdpMLineIndex,
+			}),
+		);
 	}
 
 	private notifyMessage(message: Message): void {

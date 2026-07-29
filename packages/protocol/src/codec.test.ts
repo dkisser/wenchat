@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { decode, encode } from "./codec.ts";
-import type { TextMessage } from "./message.ts";
+import { decode, encode } from "./codec";
+import type { TextMessage } from "./message";
 
 describe("codec", () => {
 	it("encodes and decodes a text message", () => {

@@ -1,5 +1,5 @@
-import { Box, useApp } from "ink";
-import React, { useEffect, useState } from "react";
+import { Box } from "ink";
+import { useEffect, useState } from "react";
 import {
 	type Message,
 	type PeerInfo,
@@ -18,7 +18,6 @@ export type AppProps = {
 };
 
 export function App({ displayName, signalingPort }: AppProps) {
-	const { exit } = useApp();
 	const [peers, setPeers] = useState<PeerInfo[]>([]);
 	const [messages, setMessages] = useState<Message[]>([]);
 	const [status, setStatus] = useState<"offline" | "connecting" | "online">(

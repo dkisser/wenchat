@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { SignalingServer } from "./signaling.ts";
+import { SignalingServer } from "./signaling";
 
 describe("SignalingServer", () => {
 	let server: SignalingServer;

@@ -1,7 +1,6 @@
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "bun:test";
-import React from "react";
-import { PeerList } from "./PeerList.tsx";
+import { PeerList } from "./PeerList";
 
 describe("PeerList", () => {
 	it("renders peer names", () => {

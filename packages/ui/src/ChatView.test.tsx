@@ -1,7 +1,6 @@
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "bun:test";
-import React from "react";
-import { ChatView } from "./ChatView.tsx";
+import { ChatView } from "./ChatView";
 
 describe("ChatView", () => {
 	it("renders text messages", () => {

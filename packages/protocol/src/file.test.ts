@@ -4,7 +4,7 @@ import {
 	createFileChunks,
 	createFileStart,
 	reassembleFile,
-} from "./file.ts";
+} from "./file";
 
 describe("file transfer", () => {
 	it("splits file into chunks", () => {

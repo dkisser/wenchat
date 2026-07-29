@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { computeChecksum, decode, encode } from "./index.ts";
-import type { TextMessage } from "./index.ts";
+import { computeChecksum, decode, encode } from "./index";
+import type { TextMessage } from "./index";
 
 describe("index exports", () => {
 	it("exports codec and file helpers", () => {

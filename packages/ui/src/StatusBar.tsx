@@ -1,5 +1,4 @@
 import { Box, Text } from "ink";
-import React from "react";
 
 export type StatusBarProps = {
 	status: "offline" | "connecting" | "online";

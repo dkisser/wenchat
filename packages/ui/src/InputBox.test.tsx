@@ -1,7 +1,6 @@
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "bun:test";
-import React from "react";
-import { InputBox } from "./InputBox.tsx";
+import { InputBox } from "./InputBox";
 
 describe("InputBox", () => {
 	it("renders input prompt", () => {

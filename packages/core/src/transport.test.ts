@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { DataTransport } from "./transport.ts";
+import { DataTransport } from "./transport";
 
 describe("DataTransport", () => {
 	it("wraps a channel and forwards decoded messages", () => {
@@ -9,7 +9,7 @@ describe("DataTransport", () => {
 			onmessage: null as ((event: { data: Uint8Array }) => void) | null,
 		};
 
-		const transport = new DataTransport(fakeChannel as unknown as RTCDataChannel);
+		const transport = new DataTransport(fakeChannel as never);
 		transport.onMessage((msg) => messages.push(msg));
 
 		const encoded = new TextEncoder().encode(

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { DiscoveryService } from "./discovery.ts";
+import { DiscoveryService } from "./discovery";
 
 function createMockBonjour() {
 	const listeners: {

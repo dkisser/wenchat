@@ -1,4 +1,4 @@
-import type { FileChunkMessage, FileStartMessage } from "./message.ts";
+import type { FileChunkMessage, FileStartMessage } from "./message";
 
 export function createFileStart(
 	fileName: string,

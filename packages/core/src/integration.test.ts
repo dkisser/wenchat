@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { TextMessage } from "@wenchat/protocol";
-import { PeerConnection } from "./peer.ts";
+import { PeerConnection } from "./peer";
 
 describe("core integration", () => {
 	let alice: PeerConnection;

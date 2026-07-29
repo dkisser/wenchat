@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { PeerConnection } from "./peer.ts";
+import { PeerConnection } from "./peer";
 
 describe("PeerConnection", () => {
 	it("creates a peer connection", () => {

@@ -27,7 +27,7 @@ export class DiscoveryService {
 	private localId: string = randomUUID();
 
 	constructor(bonjour?: BonjourLike) {
-		this.bonjour = bonjour ?? (new Bonjour() as BonjourLike);
+		this.bonjour = bonjour ?? (new Bonjour() as unknown as BonjourLike);
 	}
 
 	async start(displayName: string, signalingPort: number): Promise<void> {
@@ -46,7 +46,7 @@ export class DiscoveryService {
 			this.service = published.service;
 
 			this.service.on("up", () => resolve());
-			this.service.on("error", (err: Error) => reject(err));
+			this.service.on("error", (arg?: unknown) => reject(getErrorMessage(arg)));
 
 			this.browser = this.bonjour.find({
 				type: SERVICE_TYPE,
@@ -121,4 +121,11 @@ function parseService(service: unknown): PeerInfo | null {
 		signalingHost: String(addresses[0] || s.host || "127.0.0.1"),
 		signalingPort,
 	};
+}
+
+function getErrorMessage(error: unknown): string {
+	if (error instanceof Error) {
+		return error.message;
+	}
+	return "Unexpected error";
 }

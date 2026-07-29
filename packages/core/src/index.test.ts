@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { DiscoveryService, PeerConnection, SignalingServer } from "./index.ts";
+import { DiscoveryService, PeerConnection, SignalingServer } from "./index";
 
 describe("core index exports", () => {
 	it("exports all public classes", () => {

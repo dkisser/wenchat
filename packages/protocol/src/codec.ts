@@ -1,4 +1,4 @@
-import type { Message } from "./message.ts";
+import type { Message } from "./message";
 
 const MESSAGE_TYPES = new Set(["text", "file-start", "file-chunk", "file-end"]);
 

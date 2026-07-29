@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { ChatView, InputBox, PeerList, StatusBar } from "./index.tsx";
+import { ChatView, InputBox, PeerList, StatusBar } from "./index";
 
 describe("ui index exports", () => {
 	it("exports all components", () => {

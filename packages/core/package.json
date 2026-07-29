@@ -6,7 +6,7 @@
 	"types": "./src/index.ts",
 	"scripts": {
 		"test": "bun test",
-		"build": "tsc"
+		"build": "tsc -p tsconfig.json"
 	},
 	"dependencies": {
 		"@wenchat/protocol": "workspace:*",
