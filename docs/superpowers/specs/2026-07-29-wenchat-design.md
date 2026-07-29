@@ -42,7 +42,7 @@ WenChat 是一个运行在终端（TUI）内的局域网 P2P 通讯工具，支�
 |---|---|---|
 | 运行时 | Node.js | 兼容成熟 WebRTC 库，保持与现有生态一致 |
 | 包管理/构建 | Bun | 安装与构建速度快，支持 workspace |
-| WebRTC | `werift-webrtc` | 纯 TypeScript 实现，无原生依赖，Bun 友好 |
+| WebRTC | `werift` | 纯 TypeScript 实现，无原生依赖，Bun 友好 |
 | 局域网发现 | `bonjour-service` | 纯 JS 的 mDNS/Bonjour 实现，跨平台一致 |
 | TUI | `ink` | React 风格组件，TypeScript 友好，维护活跃 |
 | 序列化 | JSON + 二进制 buffer | 聊天用 JSON，文件传输用二进制 chunk |
@@ -105,7 +105,7 @@ wenchat/
 
 ### 6.3 PeerConnection
 
-- 封装 `werift-webrtc` 的 `RTCPeerConnection`
+- 封装 `werift` 的 `RTCPeerConnection`
 - 创建/管理 `RTCDataChannel`
 - 处理 ICE candidate、连接状态变化
 
