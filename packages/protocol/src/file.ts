@@ -4,13 +4,14 @@ export function createFileStart(
 	fileName: string,
 	file: Uint8Array,
 	chunkSize: number,
+	transferId: string = crypto.randomUUID(),
 ): FileStartMessage {
 	return {
 		type: "file-start",
 		id: crypto.randomUUID(),
 		timestamp: Date.now(),
 		payload: {
-			transferId: crypto.randomUUID(),
+			transferId,
 			fileName,
 			fileSize: file.length,
 			chunkSize,
@@ -22,8 +23,8 @@ export function createFileStart(
 export function createFileChunks(
 	file: Uint8Array,
 	chunkSize: number,
+	transferId: string = crypto.randomUUID(),
 ): FileChunkMessage[] {
-	const transferId = crypto.randomUUID();
 	const chunks: FileChunkMessage[] = [];
 	for (let i = 0; i < file.length; i += chunkSize) {
 		const slice = file.slice(i, i + chunkSize);
