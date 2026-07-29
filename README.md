@@ -30,6 +30,7 @@ bun run cli
 
 ## Tooling
 
-- [Bun](https://bun.sh/) – Runtime, package manager, and test runner
+- [Bun](https://bun.sh/) – Package manager, test runner, and build tool
+- [Node.js](https://nodejs.org/) – Runtime for the CLI
 - [TypeScript](https://www.typescriptlang.org/) – Type-safe JavaScript
 - [Biome](https://biomejs.dev/) – Linting and formatting
