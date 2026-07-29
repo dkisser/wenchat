@@ -44,10 +44,7 @@ export function createFileChunks(
 
 export function reassembleFile(chunks: FileChunkMessage[]): Uint8Array {
 	const sorted = [...chunks].sort((a, b) => a.payload.index - b.payload.index);
-	const totalLength = sorted.reduce(
-		(sum, chunk) => sum + chunk.payload.data.length,
-		0,
-	);
+	const totalLength = sorted.reduce((sum, chunk) => sum + chunk.payload.data.length, 0);
 	const result = new Uint8Array(totalLength);
 	let offset = 0;
 	for (const chunk of sorted) {

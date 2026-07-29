@@ -1,5 +1,5 @@
-import { render } from "ink-testing-library";
 import { describe, expect, it } from "bun:test";
+import { render } from "ink-testing-library";
 import { PeerList } from "./PeerList";
 
 describe("PeerList", () => {

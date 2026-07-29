@@ -1,14 +1,6 @@
-import { type Message } from "@wenchat/protocol";
-import {
-	RTCPeerConnection,
-	type RTCDataChannel,
-	RTCIceCandidate,
-} from "werift";
-import {
-	SignalingServer,
-	type IceCandidatePayload,
-	type SdpPayload,
-} from "./signaling";
+import type { Message } from "@wenchat/protocol";
+import { type RTCDataChannel, RTCIceCandidate, RTCPeerConnection } from "werift";
+import { type IceCandidatePayload, type SdpPayload, SignalingServer } from "./signaling";
 import { DataTransport } from "./transport";
 
 const DATA_CHANNEL_LABEL = "wenchat";

@@ -1,6 +1,6 @@
-import Bonjour from "bonjour-service";
-import type { PeerInfo } from "@wenchat/protocol";
 import { randomUUID } from "node:crypto";
+import type { PeerInfo } from "@wenchat/protocol";
+import Bonjour from "bonjour-service";
 
 const SERVICE_TYPE = "wenchat";
 const SERVICE_PROTOCOL = "tcp";

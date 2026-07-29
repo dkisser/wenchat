@@ -1,5 +1,5 @@
-import { render } from "ink-testing-library";
 import { describe, expect, it } from "bun:test";
+import { render } from "ink-testing-library";
 import { ChatView } from "./ChatView";
 
 describe("ChatView", () => {
@@ -12,9 +12,7 @@ describe("ChatView", () => {
 				payload: { text: "hi" },
 			},
 		];
-		const { lastFrame } = render(
-			<ChatView messages={messages} localId="local" />,
-		);
+		const { lastFrame } = render(<ChatView messages={messages} localId="local" />);
 		expect(lastFrame()).toContain("hi");
 	});
 });

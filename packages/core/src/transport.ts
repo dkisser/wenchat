@@ -1,4 +1,4 @@
-import { decode, encode, type Message } from "@wenchat/protocol";
+import { type Message, decode, encode } from "@wenchat/protocol";
 import type { RTCDataChannel } from "werift";
 
 export class DataTransport {

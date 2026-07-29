@@ -1,6 +1,6 @@
+import type { PeerInfo } from "@wenchat/protocol";
 import { Box, Text, useInput } from "ink";
 import { useState } from "react";
-import type { PeerInfo } from "@wenchat/protocol";
 
 export type PeerListProps = {
 	peers: PeerInfo[];

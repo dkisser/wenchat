@@ -1,5 +1,5 @@
-import { Box, Text } from "ink";
 import type { Message } from "@wenchat/protocol";
+import { Box, Text } from "ink";
 
 export type ChatViewProps = {
 	messages: Message[];

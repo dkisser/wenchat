@@ -1,5 +1,6 @@
-import { Box } from "ink";
-import { useEffect, useState } from "react";
+import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { DiscoveryService, PeerConnection } from "@wenchat/core";
 import {
 	type Message,
 	type PeerInfo,
@@ -7,10 +8,9 @@ import {
 	createFileChunks,
 	createFileStart,
 } from "@wenchat/protocol";
-import { DiscoveryService, PeerConnection } from "@wenchat/core";
 import { ChatView, InputBox, PeerList, StatusBar } from "@wenchat/ui";
-import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { Box } from "ink";
+import { useEffect, useState } from "react";
 
 export type AppProps = {
 	displayName: string;
@@ -20,9 +20,7 @@ export type AppProps = {
 export function App({ displayName, signalingPort }: AppProps) {
 	const [peers, setPeers] = useState<PeerInfo[]>([]);
 	const [messages, setMessages] = useState<Message[]>([]);
-	const [status, setStatus] = useState<"offline" | "connecting" | "online">(
-		"offline",
-	);
+	const [status, setStatus] = useState<"offline" | "connecting" | "online">("offline");
 	const [selectedPeer, setSelectedPeer] = useState<PeerInfo | null>(null);
 	const [localId] = useState(() => randomUUID());
 

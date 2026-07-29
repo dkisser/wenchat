@@ -1,36 +1,64 @@
 # WenChat
 
-A terminal-based LAN P2P chat and file-transfer client built with WebRTC data channels and mDNS discovery.
+局域网内基于 WebRTC 的终端 P2P 通讯工具。
 
-## Project Structure
+## 功能
 
-This is a Bun/Node.js monorepo organized as follows:
+- 文字聊天
+- 文件传输
+- mDNS 自动发现局域网 peer
+- 终端交互界面（TUI）
 
-- `apps/cli` – Terminal UI application powered by [Ink](https://github.com/vadimdemedes/ink)
-- `packages/protocol` – Shared message protocol and serialization
-- `packages/core` – WebRTC signaling, mDNS discovery, and networking logic
-- `packages/ui` – Reusable terminal UI components
+## 技术栈
 
-## Getting Started
+- Node.js
+- Bun（包管理/构建）
+- `werift`
+- `bonjour-service`
+- `ink`
+- Biome
 
-Requires [Bun](https://bun.sh/) and Node.js >= 20.
+## 安装
 
 ```bash
 bun install
-bun run cli
 ```
 
-## Scripts
+## 运行
 
-- `bun run build` – Build all packages
-- `bun test` – Run all tests
-- `bun run lint` – Lint the codebase with Biome
-- `bun run format` – Format the codebase with Biome
-- `bun run cli` – Run the CLI application
+在终端 A：
 
-## Tooling
+```bash
+bun run cli alice
+```
 
-- [Bun](https://bun.sh/) – Package manager, test runner, and build tool
-- [Node.js](https://nodejs.org/) – Runtime for the CLI
-- [TypeScript](https://www.typescriptlang.org/) – Type-safe JavaScript
-- [Biome](https://biomejs.dev/) – Linting and formatting
+在终端 B：
+
+```bash
+bun run cli bob
+```
+
+用方向键选择 peer，回车连接，输入文字发送。发送文件：
+
+```
+/file /path/to/file.txt
+```
+
+## 测试
+
+```bash
+bun test
+```
+
+## 构建
+
+```bash
+bun run build
+```
+
+## 项目结构
+
+- `apps/cli` – 终端应用入口
+- `packages/protocol` – 共享消息协议和序列化
+- `packages/core` – WebRTC 信令、mDNS 发现和网络逻辑
+- `packages/ui` – 可复用的终端 UI 组件

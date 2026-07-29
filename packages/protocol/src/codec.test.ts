@@ -20,9 +20,7 @@ describe("codec", () => {
 	});
 
 	it("throws on unknown message type", () => {
-		const invalid = new TextEncoder().encode(
-			JSON.stringify({ type: "unknown", id: "x" }),
-		);
+		const invalid = new TextEncoder().encode(JSON.stringify({ type: "unknown", id: "x" }));
 		expect(() => decode(invalid)).toThrow();
 	});
 });

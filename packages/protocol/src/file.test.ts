@@ -1,10 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	computeChecksum,
-	createFileChunks,
-	createFileStart,
-	reassembleFile,
-} from "./file";
+import { computeChecksum, createFileChunks, createFileStart, reassembleFile } from "./file";
 
 describe("file transfer", () => {
 	it("splits file into chunks", () => {
