@@ -144,6 +144,13 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 		peerConnection.close();
 		discovery.stop().catch(() => {});
 		exit();
+		// Force the Node process to terminate. Ink's `exit()` only unmounts
+		// the React tree and restores the terminal — it does not close the
+		// event loop. Without this, open handles (UDP mDNS socket from
+		// discovery, TCP signaling listener, WebRTC sockets via werift) keep
+		// the process alive and leave the terminal in raw mode with no UI,
+		// which the user perceives as a frozen terminal.
+		setImmediate(() => process.exit(0));
 	};
 
 	const handleConnect = async (hostPort: string) => {
