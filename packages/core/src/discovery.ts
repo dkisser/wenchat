@@ -27,7 +27,17 @@ export class DiscoveryService {
 	private localId: string = randomUUID();
 
 	constructor(bonjour?: BonjourLike) {
-		this.bonjour = bonjour ?? (new Bonjour() as unknown as BonjourLike);
+		this.bonjour =
+			bonjour ??
+			(new Bonjour(
+				undefined,
+				(err: unknown) => {
+					// mDNS socket error (e.g. bind failure on macOS) is non-fatal —
+					// peer discovery is a best-effort feature.
+					const message = getErrorMessage(err);
+					process.stderr.write(`[discovery] mDNS error: ${message}\n`);
+				},
+			) as unknown as BonjourLike);
 	}
 
 	async start(displayName: string, signalingPort: number): Promise<void> {
