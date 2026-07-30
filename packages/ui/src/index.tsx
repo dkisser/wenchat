@@ -4,5 +4,6 @@ export * from "./InputBox";
 export * from "./PeerList";
 export * from "./StatusBar";
 export * from "./commandHistory";
+export * from "./fileReceiver";
 export * from "./historyStore";
 export * from "./magicCommands";

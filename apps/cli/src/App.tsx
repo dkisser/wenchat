@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
+import { basename } from "node:path";
 import { DiscoveryService, PeerConnection } from "@wenchat/core";
 import {
 	type Message,
@@ -8,9 +9,18 @@ import {
 	createFileChunks,
 	createFileStart,
 } from "@wenchat/protocol";
-import { ChatView, CommandSuggestion, InputBox, PeerList, StatusBar } from "@wenchat/ui";
+import {
+	ChatView,
+	CommandSuggestion,
+	DEFAULT_DOWNLOAD_DIR,
+	FileReceiver,
+	InputBox,
+	PeerList,
+	StatusBar,
+	saveCompletedTransfer,
+} from "@wenchat/ui";
 import { Box, useApp } from "ink";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export type AppProps = {
 	displayName: string;
@@ -29,6 +39,7 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 
 	const [discovery] = useState(() => new DiscoveryService());
 	const [peerConnection] = useState(() => new PeerConnection());
+	const fileReceiverRef = useRef(new FileReceiver());
 
 	useEffect(() => {
 		discovery.onPeersUpdated(setPeers);
@@ -36,6 +47,21 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 		peerConnection.startListening(signalingPort, signalingHost).catch(() => {});
 		peerConnection.onMessage((message) => {
 			setMessages((prev) => [...prev, message]);
+
+			if (message.type === "file-start") {
+				fileReceiverRef.current.onStart(message);
+			} else if (message.type === "file-chunk") {
+				const completed = fileReceiverRef.current.onChunk(message);
+				if (completed) {
+					void saveCompletedTransfer(DEFAULT_DOWNLOAD_DIR, completed)
+						.then((path) => {
+							appendSystemMessage(`Saved file: ${path}`);
+						})
+						.catch((err: unknown) => {
+							appendSystemMessage(`Failed to save file: ${getErrorMessage(err)}`);
+						});
+				}
+			}
 		});
 		peerConnection.onStateChange((state) => {
 			if (state === "connected") setStatus("online");
@@ -44,6 +70,7 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 		});
 
 		return () => {
+			fileReceiverRef.current.clear();
 			discovery.stop().catch(() => {});
 			peerConnection.close();
 		};
@@ -82,17 +109,30 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 
 	const handleFile = async (path: string) => {
 		try {
+			// Pre-flight check so missing files short-circuit before we touch
+			// the data channel. Any error thrown here means nothing has been
+			// sent to the peer yet — the receiver's ChatView stays untouched.
+			await access(path);
 			const file = await readFile(path);
 			const chunkSize = 16 * 1024;
 			const transferId = randomUUID();
-			const start = createFileStart(path, file, chunkSize, transferId);
+			// Send only the basename over the wire so the receiver never
+			// learns where the file lives on our disk.
+			const displayName = basename(path);
+			const start = createFileStart(displayName, file, chunkSize, transferId);
 			peerConnection.send(start);
 			const chunks = createFileChunks(file, chunkSize, transferId);
 			for (const chunk of chunks) {
 				peerConnection.send(chunk);
 			}
 		} catch (err) {
-			appendSystemMessage(`Failed to send file: ${getErrorMessage(err)}`);
+			if (isErrnoException(err) && err.code === "ENOENT") {
+				appendSystemMessage(`File doesn't exist: ${path}`);
+			} else if (isErrnoException(err) && err.code === "EACCES") {
+				appendSystemMessage(`Cannot read file (permission denied): ${path}`);
+			} else {
+				appendSystemMessage(`Failed to send file: ${getErrorMessage(err)}`);
+			}
 		}
 	};
 
@@ -178,4 +218,8 @@ function getErrorMessage(error: unknown): string {
 		return error.message;
 	}
 	return "Unexpected error";
+}
+
+function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
+	return err instanceof Error && "code" in err;
 }

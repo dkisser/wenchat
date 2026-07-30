@@ -60,3 +60,16 @@ export function matchCommands(partialName: string): readonly CommandSpec[] {
 	const lower = partialName.toLowerCase();
 	return MAGIC_COMMANDS.filter((cmd) => cmd.name.startsWith(lower));
 }
+
+/**
+ * Split the input into the leading slash-command portion and the rest.
+ * `name` keeps the leading `/` (e.g. `/file`) and is the empty string when
+ * the input is not a command. `arg` preserves the trailing portion verbatim
+ * (no trimming) so renderers can keep cursor positions stable.
+ */
+export function splitCommand(input: string): { name: string; arg: string } {
+	if (!input.startsWith("/")) return { name: "", arg: input };
+	const spaceIdx = input.indexOf(" ");
+	if (spaceIdx === -1) return { name: input, arg: "" };
+	return { name: input.slice(0, spaceIdx), arg: input.slice(spaceIdx + 1) };
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { MAGIC_COMMANDS, matchCommands, parseCommand } from "./magicCommands";
+import { MAGIC_COMMANDS, matchCommands, parseCommand, splitCommand } from "./magicCommands";
 
 describe("parseCommand", () => {
 	it("returns null for plain text", () => {
@@ -78,5 +78,35 @@ describe("matchCommands", () => {
 
 	it("returns empty array when no commands match", () => {
 		expect(matchCommands("xyz")).toEqual([]);
+	});
+});
+
+describe("splitCommand", () => {
+	it("returns empty name for plain text", () => {
+		expect(splitCommand("hello world")).toEqual({ name: "", arg: "hello world" });
+	});
+
+	it("returns empty name for an empty string", () => {
+		expect(splitCommand("")).toEqual({ name: "", arg: "" });
+	});
+
+	it("returns empty name for a lone slash", () => {
+		expect(splitCommand("/")).toEqual({ name: "/", arg: "" });
+	});
+
+	it("splits a bare command name", () => {
+		expect(splitCommand("/help")).toEqual({ name: "/help", arg: "" });
+	});
+
+	it("splits a command with an argument", () => {
+		expect(splitCommand("/file /etc/hosts")).toEqual({ name: "/file", arg: "/etc/hosts" });
+	});
+
+	it("preserves trailing whitespace in the argument", () => {
+		expect(splitCommand("/file   foo  ")).toEqual({ name: "/file", arg: "  foo  " });
+	});
+
+	it("includes unknown command names verbatim", () => {
+		expect(splitCommand("/nope arg")).toEqual({ name: "/nope", arg: "arg" });
 	});
 });

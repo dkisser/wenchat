@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { HistoryStore } from "./historyStore";
-import { parseCommand } from "./magicCommands";
+import { parseCommand, splitCommand } from "./magicCommands";
 
 export type InputBoxProps = {
 	value: string;
@@ -35,6 +35,15 @@ export function InputBox({
 	useEffect(() => {
 		onChangeRef.current = onChange;
 	});
+
+	// Blink the trailing caret on a fixed 500ms cadence. Ink hides the host
+	// terminal's native blinking cursor on mount, so without this the input
+	// has no visible caret at all.
+	const [cursorVisible, setCursorVisible] = useState(true);
+	useEffect(() => {
+		const id = setInterval(() => setCursorVisible((v) => !v), 500);
+		return () => clearInterval(id);
+	}, []);
 
 	const historyRef = useRef<HistoryStore | null>(null);
 	if (historyRef.current === null) {
@@ -97,9 +106,22 @@ export function InputBox({
 		}
 	});
 
+	// Split the typed value into the prompt, the command name (if any), and
+	// the argument so the command name can be highlighted independently. The
+	// caret sits at the end of the value — the current input only supports
+	// append / backspace, so cursor position is implicit.
+	const { name: commandName, arg } = splitCommand(value);
+
 	return (
 		<Box borderStyle="single" paddingX={1}>
-			<Text>{`> ${value}`}</Text>
+			<Text>{"> "}</Text>
+			{commandName.length > 0 && (
+				<Text color="cyan" bold>
+					{commandName}
+				</Text>
+			)}
+			<Text>{arg}</Text>
+			<Text>{cursorVisible ? "▏" : " "}</Text>
 		</Box>
 	);
 }
