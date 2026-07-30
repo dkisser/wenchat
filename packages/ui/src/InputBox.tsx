@@ -1,5 +1,6 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useRef } from "react";
+import { HistoryStore } from "./historyStore";
 import { parseCommand } from "./magicCommands";
 
 export type InputBoxProps = {
@@ -11,11 +12,17 @@ export type InputBoxProps = {
 };
 
 /**
- * Controlled single-line input. Routes the line to one of three callbacks
- * when the user presses Enter:
- *   - `onCommand(name, arg)` for recognized magic commands (`/file`, `/exit`, etc.)
- *   - `onUnknownCommand(name, arg)` for `/`-prefixed lines with an unknown name
- *   - `onSubmit(text)` for plain (non-slash) messages
+ * Controlled single-line input with shell-style history recall.
+ *
+ * Behavior:
+ * - Enter dispatches the line as before (command → onCommand/onUnknownCommand,
+ *   plain text → onSubmit).
+ * - Up / Ctrl+P recall the previous entry; Down / Ctrl+N go forward. Going
+ *   past the newest entry restores the draft the user was typing before
+ *   they started scrolling, mirroring bash/zsh/readline.
+ * - History persists across sessions via {@link HistoryStore}, which reads
+ *   from `~/.wechat/.wechat_history` on mount and writes back atomically
+ *   after each submit.
  */
 export function InputBox({
 	value,
@@ -29,7 +36,36 @@ export function InputBox({
 		onChangeRef.current = onChange;
 	});
 
+	const historyRef = useRef<HistoryStore | null>(null);
+	if (historyRef.current === null) {
+		historyRef.current = new HistoryStore();
+		// Fire-and-forget load — first keypresses may happen before init
+		// resolves, but `prev`/`next` are no-ops on empty history so that's
+		// safe. The file load completes within a tick in practice.
+		historyRef.current.init().catch((err: unknown) => {
+			console.error("[history] init failed:", err);
+		});
+	}
+
 	useInput((input, key) => {
+		const history = historyRef.current;
+		if (!history) return;
+
+		const isUp = key.upArrow || (key.ctrl && input === "p");
+		const isDown = key.downArrow || (key.ctrl && input === "n");
+
+		if (isUp) {
+			const recalled = history.prev(value);
+			if (recalled !== null) onChangeRef.current(recalled);
+			return;
+		}
+
+		if (isDown) {
+			const recalled = history.next();
+			if (recalled !== null) onChangeRef.current(recalled);
+			return;
+		}
+
 		if (key.return) {
 			if (value.length > 0) {
 				const parsed = parseCommand(value);
@@ -43,6 +79,7 @@ export function InputBox({
 				} else if (value.trim().length > 0) {
 					onSubmit(value);
 				}
+				history.push(value);
 			}
 			onChangeRef.current("");
 			return;
@@ -54,6 +91,8 @@ export function InputBox({
 		}
 
 		if (!key.ctrl && !key.meta && input) {
+			// Any new typing invalidates history browsing (matches readline).
+			history.reset();
 			onChangeRef.current(value + input);
 		}
 	});

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { render } from "ink";
 import { getLanHost } from "@wenchat/core";
+import { render } from "ink";
 import { App } from "./App";
 
 const args = process.argv.slice(2);
@@ -12,9 +12,5 @@ const signalingPort = Number(args[1]) || 0;
 const signalingHost = args[2] || getLanHost();
 
 render(
-	<App
-		displayName={displayName}
-		signalingPort={signalingPort}
-		signalingHost={signalingHost}
-	/>,
+	<App displayName={displayName} signalingPort={signalingPort} signalingHost={signalingHost} />,
 );

@@ -45,9 +45,7 @@ async function main() {
 	if (lanOk && loopbackBlocked) {
 		console.log("[smoke] PASS: LAN reachable, loopback correctly NOT bound");
 	} else {
-		console.log(
-			`[smoke] FAIL: lanOk=${lanOk}, loopbackBlocked=${loopbackBlocked}`,
-		);
+		console.log(`[smoke] FAIL: lanOk=${lanOk}, loopbackBlocked=${loopbackBlocked}`);
 		process.exit(1);
 	}
 }
