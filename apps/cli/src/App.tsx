@@ -8,8 +8,8 @@ import {
 	createFileChunks,
 	createFileStart,
 } from "@wenchat/protocol";
-import { ChatView, InputBox, PeerList, StatusBar } from "@wenchat/ui";
-import { Box } from "ink";
+import { ChatView, CommandSuggestion, InputBox, PeerList, StatusBar } from "@wenchat/ui";
+import { Box, useApp } from "ink";
 import { useEffect, useState } from "react";
 
 export type AppProps = {
@@ -18,10 +18,12 @@ export type AppProps = {
 };
 
 export function App({ displayName, signalingPort }: AppProps) {
+	const { exit } = useApp();
 	const [peers, setPeers] = useState<PeerInfo[]>([]);
 	const [messages, setMessages] = useState<Message[]>([]);
 	const [status, setStatus] = useState<"offline" | "connecting" | "online">("offline");
 	const [selectedPeer, setSelectedPeer] = useState<PeerInfo | null>(null);
+	const [inputText, setInputText] = useState("");
 	const [localId] = useState(() => randomUUID());
 
 	const [discovery] = useState(() => new DiscoveryService());
@@ -67,6 +69,16 @@ export function App({ displayName, signalingPort }: AppProps) {
 		setMessages((prev) => [...prev, message]);
 	};
 
+	const appendSystemMessage = (text: string) => {
+		const message: TextMessage = {
+			type: "text",
+			id: `system-${randomUUID()}`,
+			timestamp: Date.now(),
+			payload: { text },
+		};
+		setMessages((prev) => [...prev, message]);
+	};
+
 	const handleFile = async (path: string) => {
 		try {
 			const file = await readFile(path);
@@ -79,16 +91,66 @@ export function App({ displayName, signalingPort }: AppProps) {
 				peerConnection.send(chunk);
 			}
 		} catch (err) {
-			setMessages((prev) => [
-				...prev,
-				{
-					type: "text",
-					id: `error-${randomUUID()}`,
-					timestamp: Date.now(),
-					payload: { text: `Failed to send file: ${getErrorMessage(err)}` },
-				},
-			]);
+			appendSystemMessage(`Failed to send file: ${getErrorMessage(err)}`);
 		}
+	};
+
+	const handleHelp = () => {
+		appendSystemMessage("Magic commands: /exit, /file <path>, /help, /connect <host:port>");
+	};
+
+	const handleExit = () => {
+		peerConnection.close();
+		discovery.stop().catch(() => {});
+		exit();
+	};
+
+	const handleConnect = async (hostPort: string) => {
+		const lastColon = hostPort.lastIndexOf(":");
+		if (lastColon <= 0 || lastColon === hostPort.length - 1) {
+			appendSystemMessage(`Invalid /connect argument: expected <host:port>, got "${hostPort}"`);
+			return;
+		}
+		const host = hostPort.slice(0, lastColon);
+		const port = Number(hostPort.slice(lastColon + 1));
+		if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+			appendSystemMessage(`Invalid /connect argument: port out of range in "${hostPort}"`);
+			return;
+		}
+		setSelectedPeer({
+			id: "manual",
+			displayName: hostPort,
+			signalingHost: host,
+			signalingPort: port,
+		});
+		setStatus("connecting");
+		try {
+			await peerConnection.connect(host, port);
+		} catch {
+			setStatus("offline");
+			appendSystemMessage(`Failed to connect to ${hostPort}`);
+		}
+	};
+
+	const handleCommand = (name: string, arg: string) => {
+		switch (name) {
+			case "exit":
+				handleExit();
+				return;
+			case "file":
+				void handleFile(arg);
+				return;
+			case "help":
+				handleHelp();
+				return;
+			case "connect":
+				void handleConnect(arg);
+				return;
+		}
+	};
+
+	const handleUnknownCommand = (name: string, _arg: string) => {
+		appendSystemMessage(`Unknown command: /${name}. Type /help for the list.`);
 	};
 
 	return (
@@ -98,7 +160,14 @@ export function App({ displayName, signalingPort }: AppProps) {
 				<PeerList peers={peers} onSelect={handleSelectPeer} />
 				<ChatView messages={messages} localId={localId} />
 			</Box>
-			<InputBox onSubmit={handleSend} onFile={handleFile} />
+			<CommandSuggestion partial={inputText} />
+			<InputBox
+				value={inputText}
+				onChange={setInputText}
+				onSubmit={handleSend}
+				onCommand={handleCommand}
+				onUnknownCommand={handleUnknownCommand}
+			/>
 		</Box>
 	);
 }
