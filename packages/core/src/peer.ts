@@ -46,7 +46,7 @@ export class PeerConnection {
 
 	async startListening(signalingPort: number, signalingHost = "127.0.0.1"): Promise<void> {
 		this.localSignalingHost = signalingHost;
-		await this.signaling.start(signalingPort);
+		await this.signaling.start(signalingPort, signalingHost);
 		this.signaling.onOffer(async (offer) => {
 			return this.acceptOffer(offer);
 		});

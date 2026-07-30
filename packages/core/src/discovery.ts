@@ -36,7 +36,11 @@ export class DiscoveryService {
 			}) as unknown as BonjourLike);
 	}
 
-	async start(displayName: string, signalingPort: number): Promise<void> {
+	async start(
+		displayName: string,
+		signalingPort: number,
+		signalingHost = "127.0.0.1",
+	): Promise<void> {
 		return new Promise((resolve, reject) => {
 			const published = this.bonjour.publish({
 				name: `${displayName}-${this.localId.slice(0, 6)}`,
@@ -46,6 +50,7 @@ export class DiscoveryService {
 				txt: {
 					id: this.localId,
 					displayName,
+					signalingHost,
 					signalingPort: String(signalingPort),
 				},
 			});
@@ -124,7 +129,7 @@ function parseService(service: unknown): PeerInfo | null {
 	return {
 		id: txt.id,
 		displayName: txt.displayName || String(s.name || txt.id),
-		signalingHost: String(addresses[0] || s.host || "127.0.0.1"),
+		signalingHost: txt.signalingHost || String(addresses[0] || s.host || "127.0.0.1"),
 		signalingPort,
 	};
 }

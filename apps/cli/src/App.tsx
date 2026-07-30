@@ -15,9 +15,10 @@ import { useEffect, useState } from "react";
 export type AppProps = {
 	displayName: string;
 	signalingPort: number;
+	signalingHost: string;
 };
 
-export function App({ displayName, signalingPort }: AppProps) {
+export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 	const { exit } = useApp();
 	const [peers, setPeers] = useState<PeerInfo[]>([]);
 	const [messages, setMessages] = useState<Message[]>([]);
@@ -31,8 +32,8 @@ export function App({ displayName, signalingPort }: AppProps) {
 
 	useEffect(() => {
 		discovery.onPeersUpdated(setPeers);
-		discovery.start(displayName, signalingPort).catch(() => {});
-		peerConnection.startListening(signalingPort).catch(() => {});
+		discovery.start(displayName, signalingPort, signalingHost).catch(() => {});
+		peerConnection.startListening(signalingPort, signalingHost).catch(() => {});
 		peerConnection.onMessage((message) => {
 			setMessages((prev) => [...prev, message]);
 		});
@@ -46,7 +47,7 @@ export function App({ displayName, signalingPort }: AppProps) {
 			discovery.stop().catch(() => {});
 			peerConnection.close();
 		};
-	}, [discovery, displayName, peerConnection, signalingPort]);
+	}, [discovery, displayName, peerConnection, signalingPort, signalingHost]);
 
 	const handleSelectPeer = async (peer: PeerInfo) => {
 		setSelectedPeer(peer);
