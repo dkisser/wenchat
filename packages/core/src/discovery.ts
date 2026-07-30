@@ -42,6 +42,11 @@ export class DiscoveryService {
 		signalingHost = "127.0.0.1",
 	): Promise<void> {
 		return new Promise((resolve, reject) => {
+			// The `name` below is a Bonjour/mDNS service instance name. It is
+			// published over multicast DNS (224.0.0.251) only for the lifetime of
+			// this process and has no relationship to the system hostname. macOS
+			// may display it in Finder → Network or System Settings → Sharing,
+			// which is purely cosmetic and not a real hostname mutation.
 			const published = this.bonjour.publish({
 				name: `${displayName}-${this.localId.slice(0, 6)}`,
 				type: SERVICE_TYPE,

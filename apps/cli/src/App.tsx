@@ -143,14 +143,15 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 	const handleExit = () => {
 		peerConnection.close();
 		discovery.stop().catch(() => {});
+		// Ink's `exit()` triggers App's componentWillUnmount → final onRender
+		// → cliCursor.show. After the React tree fully unmounts,
+		// `instance.waitUntilExit()` in main.tsx resolves and writes the
+		// alternate-screen exit sequence before terminating the process.
+		// We intentionally do NOT call `process.exit()` here — leaving the
+		// shutdown sequencing to main.tsx keeps the alternate buffer release
+		// and the process exit in the same microtask, so the host terminal
+		// never sees a half-rendered final frame.
 		exit();
-		// Force the Node process to terminate. Ink's `exit()` only unmounts
-		// the React tree and restores the terminal — it does not close the
-		// event loop. Without this, open handles (UDP mDNS socket from
-		// discovery, TCP signaling listener, WebRTC sockets via werift) keep
-		// the process alive and leave the terminal in raw mode with no UI,
-		// which the user perceives as a frozen terminal.
-		setImmediate(() => process.exit(0));
 	};
 
 	const handleConnect = async (hostPort: string) => {
