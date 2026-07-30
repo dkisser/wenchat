@@ -11,11 +11,12 @@
 
 ## 技术栈
 
-- Node.js
-- Bun（包管理/构建）
+- Node.js（CLI 运行时 — Bun 在 macOS 上对 `multicast-dns` 的 dgram bind 错误处理有 bug，会绕过 uncaughtException 直接终止进程）
+- Bun（包管理/构建/测试）
 - `werift`
 - `bonjour-service`
 - `ink`
+- `tsx`（直接运行 .ts/.tsx 源码）
 - Biome
 
 ## 安装
