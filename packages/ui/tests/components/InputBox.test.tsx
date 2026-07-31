@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { render } from "ink-testing-library";
 import { InputBox } from "../../src/InputBox";
 
+const ESC = "\u001B";
+
 // Interactive history navigation is exercised by commandHistory.test.ts
 // (the InputBox is just a thin shell over CommandHistory). Here we only
 // verify the static rendering, which is what the existing component does
@@ -90,5 +92,81 @@ describe("InputBox", () => {
 		// Either the visible quarter-block cursor or its hidden-space
 		// alternate appears at the end of the prompt.
 		expect(frame.includes("▏") || /hello\s$/.test(frame)).toBe(true);
+	});
+});
+
+// These few tests drive stdin directly, breaking the convention above. They
+// have to: mouse reports and Shift+Arrow are byte-level interactions between
+// two independent useInput consumers, which no pure helper test can observe.
+describe("InputBox keyboard/mouse arbitration", () => {
+	const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+	type Harness = {
+		readonly changes: string[];
+		readonly stdin: { write: (data: string) => void };
+	};
+
+	function mount(value = ""): Harness {
+		const changes: string[] = [];
+		const { stdin } = render(
+			<InputBox
+				value={value}
+				onChange={(next) => changes.push(next)}
+				onSubmit={() => {}}
+				onCommand={() => {}}
+				onUnknownCommand={() => {}}
+			/>,
+		);
+		return { changes, stdin };
+	}
+
+	it("does not type a mouse wheel report into the input", async () => {
+		// Regression test for the reported bug: ink's key parser does not
+		// recognise `ESC [ < … M`, so the raw bytes used to land in the value.
+		const { changes, stdin } = mount();
+		await tick();
+
+		stdin.write(`${ESC}[<64;10;5M`);
+		await tick();
+
+		expect(changes).toEqual([]);
+	});
+
+	it("keeps the keystroke when a chunk carries both typing and a wheel tick", async () => {
+		const { changes, stdin } = mount();
+		await tick();
+
+		stdin.write(`a${ESC}[<64;10;5M`);
+		await tick();
+
+		expect(changes).toEqual(["a"]);
+	});
+
+	it("leaves Shift+Up to the chat viewport instead of recalling history", async () => {
+		const { changes, stdin } = mount();
+		await tick();
+
+		stdin.write(`${ESC}[1;2A`);
+		stdin.write(`${ESC}[1;2B`);
+		await tick();
+
+		expect(changes).toEqual([]);
+	});
+
+	it("still recalls history on a plain Up arrow", async () => {
+		const { changes, stdin } = mount("draft");
+		await tick();
+
+		// One submit puts an entry into history, then Up recalls it.
+		stdin.write("x");
+		await tick();
+		stdin.write("\r");
+		await tick();
+		changes.length = 0;
+
+		stdin.write(`${ESC}[A`);
+		await tick();
+
+		expect(changes).toEqual(["draft"]);
 	});
 });

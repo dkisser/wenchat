@@ -8,14 +8,17 @@ paths: ["apps/cli/**"]
 
 The CLI deliberately runs through `tsx` on Node.js, not Bun, due to a Bun mDNS bind bug on macOS. The README and the long header comment at the top of `apps/cli/src/main.tsx` both document this. Commit `d02de50` is the authoritative explanation. Do not switch the CLI runtime back to Bun.
 
-## Alt-screen buffer + `exitOnCtrlC` are load-bearing
+## Alt-screen + mouse-tracking safety net + `exitOnCtrlC` are load-bearing
 
 `apps/cli/src/main.tsx`:
 - Disables Ink's `exitOnCtrlC`
-- Calls `installAltScreenSafetyNet()` before mounting
-- Calls `exitAltScreen()` + `process.exit(0)` only after `instance.waitUntilExit()`
+- Calls `installTerminalSafetyNet([exitMouseMode, exitAltScreen])` before mounting
+- Enters the alt screen, then mouse tracking (unless `--no-mouse`)
+- Calls `exitMouseMode()` + `exitAltScreen()` + `process.exit(0)` only after `instance.waitUntilExit()`
 
-A recent regression reintroduced `exitOnCtrlC` and produced a frozen terminal on exit. Keep the order: disable → install alt screen → mount → wait → exit alt screen → `process.exit(0)`.
+A recent regression reintroduced `exitOnCtrlC` and produced a frozen terminal on exit. Keep the order: disable → install safety net → enter alt screen → enter mouse mode → mount → wait → exit mouse mode → exit alt screen → `process.exit(0)`.
+
+**Why one safety net, not one per mode:** the SIGINT handler calls `process.exit(130)`. Node runs listeners in registration order, so the first handler to fire terminates the process and the second never executes — two parallel nets would leak whichever escape sequence lost the registration race. `installTerminalSafetyNet` runs the releases in array order.
 
 ## CLI args semantics
 

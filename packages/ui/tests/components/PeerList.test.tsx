@@ -15,4 +15,19 @@ describe("PeerList", () => {
 		const { lastFrame } = render(<PeerList peers={peers} onSelect={() => {}} />);
 		expect(lastFrame()).toContain("bob");
 	});
+
+	it("never grows past the height it is given", () => {
+		const peers = Array.from({ length: 50 }, (_, index) => ({
+			id: `p${index}`,
+			displayName: `peer-${index}`,
+			signalingHost: "127.0.0.1",
+			signalingPort: 9000 + index,
+		}));
+		const { lastFrame } = render(<PeerList peers={peers} onSelect={() => {}} height={10} />);
+		const frame = lastFrame() ?? "";
+		expect(frame.split("\n").length).toBe(10);
+		// The selection starts at the first peer, so the window sticks to the top.
+		expect(frame).toContain("peer-0");
+		expect(frame).not.toContain("peer-49");
+	});
 });

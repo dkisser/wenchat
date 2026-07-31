@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { render } from "ink-testing-library";
-import { CommandSuggestion } from "../../src/CommandSuggestion";
+import { CommandSuggestion, isCommandSuggestionVisible } from "../../src/CommandSuggestion";
 
 describe("CommandSuggestion", () => {
 	it("renders nothing when input is not a slash command", () => {
@@ -43,5 +43,17 @@ describe("CommandSuggestion", () => {
 		expect(frame).toContain("list");
 		expect(frame).toContain("send");
 		expect(frame).toContain("manual");
+	});
+});
+
+describe("isCommandSuggestionVisible", () => {
+	// The root layout budgets three rows for this box before render, so the
+	// predicate has to agree with the component on every input.
+	const inputs = ["", "hello", "/", "/f", "/fi", "/file", "/file x", "/zzz", "/ ", "//"];
+
+	it.each(inputs)("agrees with what the component renders for %p", (partial) => {
+		const { lastFrame } = render(<CommandSuggestion partial={partial} />);
+		const rendered = (lastFrame() ?? "").length > 0;
+		expect(isCommandSuggestionVisible(partial)).toBe(rendered);
 	});
 });

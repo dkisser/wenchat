@@ -9,28 +9,42 @@
 import { getLanHost } from "@wenchat/core";
 import { render } from "ink";
 import { App } from "./App";
-import { enterAltScreen, exitAltScreen, installAltScreenSafetyNet } from "./altScreen";
+import { enterAltScreen, exitAltScreen } from "./altScreen";
+import { enterMouseMode, exitMouseMode } from "./mouseMode";
+import { installTerminalSafetyNet } from "./terminalSafetyNet";
 
-const args = process.argv.slice(2);
-const displayName = args[0] || `user-${Math.floor(Math.random() * 10000)}`;
-const signalingPort = Number(args[1]) || 0;
+// Filter --no-mouse (and any future flags) out of argv before the positional
+// parsing, so `args[0..2]` retain their current shape.
+const rawArgs = process.argv.slice(2);
+const flags = new Set<string>();
+const positional: string[] = [];
+for (const arg of rawArgs) {
+	if (arg.startsWith("--")) flags.add(arg);
+	else positional.push(arg);
+}
+const mouseEnabled = !flags.has("--no-mouse");
+
+const displayName = positional[0] || `user-${Math.floor(Math.random() * 10000)}`;
+const signalingPort = Number(positional[1]) || 0;
 // arg[2] lets the user override (e.g. on a multi-homed host); default to the
 // detected LAN IPv4 so peers on the same network can actually reach us
 // instead of hitting 127.0.0.1.
-const signalingHost = args[2] || getLanHost();
+const signalingHost = positional[2] || getLanHost();
 
 // Enter the alternate screen buffer BEFORE Ink mounts so the user sees a
 // clean fullscreen surface, not the moment of "scrollback → TUI" transition.
 // Skip on non-TTY (e.g. piped output, CI logs) so `bun run cli > out.log`
 // keeps producing plain text without escape sequences.
-installAltScreenSafetyNet();
+const releases = mouseEnabled ? [exitMouseMode, exitAltScreen] : [exitAltScreen];
+installTerminalSafetyNet(releases);
 enterAltScreen();
+if (mouseEnabled) enterMouseMode();
 
 const instance = render(
 	<App displayName={displayName} signalingPort={signalingPort} signalingHost={signalingHost} />,
 	// Ink's built-in Ctrl+C handler is disabled so SIGINT flows through
-	// installAltScreenSafetyNet() instead of unmounting the React tree
-	// without releasing the alternate buffer.
+	// the terminal safety net instead of unmounting the React tree without
+	// releasing the alternate buffer.
 	{ exitOnCtrlC: false },
 );
 
@@ -39,6 +53,7 @@ const instance = render(
 // avoids racing Ink's last frame against stdout flush — the previous
 // implementation could leave a partial InputBox rendered on the host screen.
 instance.waitUntilExit().then(() => {
+	if (mouseEnabled) exitMouseMode();
 	exitAltScreen();
 	process.exit(0);
 });

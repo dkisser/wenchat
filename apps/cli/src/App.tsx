@@ -17,7 +17,11 @@ import {
 	InputBox,
 	PeerList,
 	StatusBar,
+	computeChatLayout,
+	isCommandSuggestionVisible,
 	saveCompletedTransfer,
+	useChatScroll,
+	useTerminalSize,
 } from "@wenchat/ui";
 import { Box, useApp } from "ink";
 import { useEffect, useRef, useState } from "react";
@@ -27,6 +31,13 @@ export type AppProps = {
 	signalingPort: number;
 	signalingHost: string;
 };
+
+/**
+ * Upper bound on the retained chat log. Without a cap, `toDisplayLines` has to
+ * re-wrap an ever-growing array on every resize and the process leaks memory
+ * across a long-lived session.
+ */
+const MAX_MESSAGES = 2000;
 
 export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 	const { exit } = useApp();
@@ -56,7 +67,7 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 		discovery.start(displayName, signalingPort, signalingHost).catch(() => {});
 		peerConnection.startListening(signalingPort, signalingHost).catch(() => {});
 		const unsubscribeMessage = peerConnection.onMessage((message) => {
-			setMessages((prev) => [...prev, message]);
+			setMessages((prev) => appendCapped(prev, message));
 
 			if (message.type === "file-start") {
 				fileReceiverRef.current.onStart(message);
@@ -134,7 +145,7 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 			payload: { text },
 		};
 		peerConnection.send(message);
-		setMessages((prev) => [...prev, message]);
+		setMessages((prev) => appendCapped(prev, message));
 	};
 
 	const appendSystemMessage = (text: string) => {
@@ -144,7 +155,7 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 			timestamp: Date.now(),
 			payload: { text },
 		};
-		setMessages((prev) => [...prev, message]);
+		setMessages((prev) => appendCapped(prev, message));
 	};
 
 	const handleFile = async (path: string) => {
@@ -242,34 +253,76 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 		appendSystemMessage(`Unknown command: /${name}. Type /help for the list.`);
 	};
 
+	const { rows, columns } = useTerminalSize();
+	const layout = computeChatLayout({
+		rows,
+		columns,
+		suggestionVisible: isCommandSuggestionVisible(inputText),
+	});
+
+	const scroll = useChatScroll({
+		messages,
+		localId,
+		contentWidth: layout.contentWidth,
+		viewportHeight: layout.viewportHeight,
+		// The chat is swapped out for the peer list while offline; leaving the
+		// scroll keys inactive there keeps arrow handling unambiguous.
+		isActive: status !== "offline",
+	});
+
 	return (
-		<Box flexDirection="column" height="100%">
-			<StatusBar
-				status={status}
-				peerName={selectedPeer?.displayName}
-				peerEndpoint={
-					selectedPeer ? `${selectedPeer.signalingHost}:${selectedPeer.signalingPort}` : undefined
-				}
-			/>
+		// A numeric height is the only thing that pins the InputBox to the last
+		// row: ink's root node never gets a height (see `ink/build/ink.js`), so
+		// `height="100%"` silently resolved to `auto` and the frame grew with the
+		// message log until the input scrolled off screen.
+		//
+		// Every direct child needs `flexShrink={0}`. Under a height-constrained
+		// column, yoga shrinks Text children until their rows overlap and
+		// overwrite one another — visible garbage, not clipping.
+		<Box flexDirection="column" height={layout.frameHeight}>
+			<Box flexShrink={0}>
+				<StatusBar
+					status={status}
+					peerName={selectedPeer?.displayName}
+					peerEndpoint={
+						selectedPeer ? `${selectedPeer.signalingHost}:${selectedPeer.signalingPort}` : undefined
+					}
+				/>
+			</Box>
 			{status === "offline" ? (
-				<Box flexDirection="row" flexGrow={1}>
-					<PeerList peers={peers} onSelect={handleSelectPeer} />
-				</Box>
+				<PeerList peers={peers} onSelect={handleSelectPeer} height={layout.chatOuterHeight} />
 			) : (
-				<Box flexDirection="row" flexGrow={1}>
-					<ChatView messages={messages} localId={localId} />
-				</Box>
+				<ChatView
+					lines={scroll.visibleLines}
+					firstLineIndex={scroll.firstLineIndex}
+					unread={scroll.unread}
+					height={layout.chatOuterHeight}
+				/>
 			)}
-			<CommandSuggestion partial={inputText} />
-			<InputBox
-				value={inputText}
-				onChange={setInputText}
-				onSubmit={handleSend}
-				onCommand={handleCommand}
-				onUnknownCommand={handleUnknownCommand}
-			/>
+			<Box flexShrink={0}>
+				<CommandSuggestion partial={inputText} />
+			</Box>
+			<Box flexShrink={0}>
+				<InputBox
+					value={inputText}
+					onChange={setInputText}
+					onSubmit={handleSend}
+					onCommand={handleCommand}
+					onUnknownCommand={handleUnknownCommand}
+					onError={(err) => appendSystemMessage(`History unavailable: ${getErrorMessage(err)}`)}
+				/>
+			</Box>
 		</Box>
 	);
+}
+
+/**
+ * Append a message, dropping the oldest once the log exceeds
+ * {@link MAX_MESSAGES}. Returns a new array — the previous one is untouched.
+ */
+function appendCapped(previous: readonly Message[], message: Message): Message[] {
+	const next = [...previous, message];
+	return next.length > MAX_MESSAGES ? next.slice(next.length - MAX_MESSAGES) : next;
 }
 
 function getErrorMessage(error: unknown): string {

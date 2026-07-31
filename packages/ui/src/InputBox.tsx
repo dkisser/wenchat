@@ -2,6 +2,7 @@ import { Box, Text, useInput } from "ink";
 import { useEffect, useRef, useState } from "react";
 import { HistoryStore } from "./historyStore";
 import { parseCommand, splitCommand } from "./magicCommands";
+import { stripMouseReports } from "./mouseEvents";
 
 export type InputBoxProps = {
 	value: string;
@@ -9,6 +10,12 @@ export type InputBoxProps = {
 	onSubmit: (text: string) => void;
 	onCommand: (name: string, arg: string) => void;
 	onUnknownCommand: (name: string, arg: string) => void;
+	/**
+	 * Reported when persisted history fails to load. Never log to the console
+	 * from here: ink patches `console.*` into `log.clear(); write; re-render`,
+	 * which injects an arbitrary-height string into the fixed-height frame.
+	 */
+	onError?: (error: unknown) => void;
 };
 
 /**
@@ -30,10 +37,16 @@ export function InputBox({
 	onSubmit,
 	onCommand,
 	onUnknownCommand,
+	onError,
 }: InputBoxProps) {
 	const onChangeRef = useRef(onChange);
 	useEffect(() => {
 		onChangeRef.current = onChange;
+	});
+
+	const onErrorRef = useRef(onError);
+	useEffect(() => {
+		onErrorRef.current = onError;
 	});
 
 	// Blink the trailing caret on a fixed 500ms cadence. Ink hides the host
@@ -52,7 +65,7 @@ export function InputBox({
 		// resolves, but `prev`/`next` are no-ops on empty history so that's
 		// safe. The file load completes within a tick in practice.
 		historyRef.current.init().catch((err: unknown) => {
-			console.error("[history] init failed:", err);
+			onErrorRef.current?.(err);
 		});
 	}
 
@@ -60,8 +73,10 @@ export function InputBox({
 		const history = historyRef.current;
 		if (!history) return;
 
-		const isUp = key.upArrow || (key.ctrl && input === "p");
-		const isDown = key.downArrow || (key.ctrl && input === "n");
+		// Shift+Arrow is reserved for scrolling the chat viewport, so history
+		// recall only claims the unmodified arrows.
+		const isUp = (key.upArrow && !key.shift) || (key.ctrl && input === "p");
+		const isDown = (key.downArrow && !key.shift) || (key.ctrl && input === "n");
 
 		if (isUp) {
 			const recalled = history.prev(value);
@@ -100,9 +115,16 @@ export function InputBox({
 		}
 
 		if (!key.ctrl && !key.meta && input) {
+			// ink's key parser does not recognise SGR mouse reports (its
+			// pattern requires `[` to be followed by a digit or a letter, and
+			// ours starts with `<`), so every wheel tick would otherwise be
+			// typed into the input. Strip rather than reject: a single stdin
+			// chunk can carry both a keystroke and a wheel report.
+			const typed = stripMouseReports(input);
+			if (typed.length === 0) return;
 			// Any new typing invalidates history browsing (matches readline).
 			history.reset();
-			onChangeRef.current(value + input);
+			onChangeRef.current(value + typed);
 		}
 	});
 
@@ -113,7 +135,7 @@ export function InputBox({
 	const { name: commandName, arg } = splitCommand(value);
 
 	return (
-		<Box borderStyle="single" paddingX={1}>
+		<Box borderStyle="single" paddingX={1} width="100%">
 			<Text>{"> "}</Text>
 			{commandName.length > 0 && (
 				<Text color="cyan" bold>

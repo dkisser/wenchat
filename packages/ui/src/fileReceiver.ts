@@ -1,7 +1,7 @@
 import { access, mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
-import { reassembleFile, type FileChunkMessage, type FileStartMessage } from "@wenchat/protocol";
+import { type FileChunkMessage, type FileStartMessage, reassembleFile } from "@wenchat/protocol";
 
 export const DEFAULT_DOWNLOAD_DIR = join(homedir(), "Downloads");
 
@@ -49,9 +49,7 @@ export class FileReceiver {
 		transfer.chunks.set(index, chunk);
 		if (transfer.chunks.size < transfer.expectedChunks) return null;
 		this.transfers.delete(transferId);
-		const sorted = [...transfer.chunks.values()].sort(
-			(a, b) => a.payload.index - b.payload.index,
-		);
+		const sorted = [...transfer.chunks.values()].sort((a, b) => a.payload.index - b.payload.index);
 		return {
 			fileName: transfer.fileName,
 			bytes: reassembleFile(sorted),
@@ -70,10 +68,7 @@ export class FileReceiver {
  * `foo.md` becomes `foo.md`, then `foo (1).md`, `foo (2).md`, … if the
  * previous names are taken.
  */
-export async function uniqueDownloadPath(
-	downloadDir: string,
-	fileName: string,
-): Promise<string> {
+export async function uniqueDownloadPath(downloadDir: string, fileName: string): Promise<string> {
 	const safeName = basename(fileName) || `received-${Date.now()}`;
 	const candidate = join(downloadDir, safeName);
 	if (!(await pathExists(candidate))) return candidate;

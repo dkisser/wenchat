@@ -18,6 +18,19 @@ async function waitForCondition(
 	return states.some(predicate);
 }
 
+async function waitForMatch<T>(
+	items: T[],
+	predicate: (item: T) => boolean,
+	timeoutMs: number,
+): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (items.some(predicate)) return true;
+		await sleep(50);
+	}
+	return items.some(predicate);
+}
+
 describe("core integration", () => {
 	let alice: PeerConnection;
 	let bob: PeerConnection;
@@ -92,7 +105,7 @@ describe("core integration", () => {
 		// Simulate "process killed" — close alice's pc directly,
 		// bypassing the public `close()` path. Bob should see a terminal
 		// state (whichever WebRTC or the heartbeat happens to emit first).
-		(alice as unknown as { pc: { close(): void } }).pc.close();
+		alice._forceCloseActivePc();
 
 		const sawTerminal = await waitForCondition(bobStates, (s) => TERMINAL_STATES.has(s), 8000);
 		expect(sawTerminal).toBe(true);
@@ -101,4 +114,99 @@ describe("core integration", () => {
 		const terminalEmissions = bobStates.filter((s) => TERMINAL_STATES.has(s));
 		expect(terminalEmissions.length).toBe(1);
 	}, 15000);
+
+	it("a fresh PeerConnection can reconnect to a peer whose pc was previously terminated", async () => {
+		// Simulates the user's bug report: "the just-disconnected end
+		// reconnects and can't". A real-world CLI run means a new
+		// process (new `PeerConnection` + new signaling port); bob
+		// meanwhile has been up the whole time. With the pre-refactor
+		// code, bob's `acceptOffer` reused its dead pc/SCTP and the
+		// re-handshake failed. With Session-per-attempt, bob's
+		// signaling.onOffer constructs a brand-new `Session` and ICE
+		// establishes cleanly.
+
+		// First handshake uses a throwaway alice.
+		const firstAlice = new PeerConnection();
+		await firstAlice.startListening(0);
+		try {
+			await firstAlice.connect("127.0.0.1", bob.getSignalingPort());
+			firstAlice.send({
+				type: "text",
+				id: "first",
+				timestamp: Date.now(),
+				payload: { text: "first hello" },
+			});
+
+			const bobReceived: TextMessage[] = [];
+			const unsubMessage = bob.onMessage((msg) => {
+				if (msg.type === "text") bobReceived.push(msg);
+			});
+			const bobStates: string[] = [];
+			const unsubState = bob.onStateChange((s) => bobStates.push(s));
+
+			const gotFirst = await waitForMatch(
+				bobReceived,
+				(m) => m.payload.text === "first hello",
+				5000,
+			);
+			expect(gotFirst).toBe(true);
+
+			// Drop firstAlice's pc abruptly to leave bob with a
+			// terminal-but-not-closed pc — exactly the state that broke
+			// the pre-refactor `acceptOffer` path.
+			firstAlice._forceCloseActivePc();
+			const sawTerminal = await waitForCondition(bobStates, (s) => TERMINAL_STATES.has(s), 8000);
+			expect(sawTerminal).toBe(true);
+
+			unsubMessage();
+			unsubState();
+
+			// "Process restart": dispose firstAlice and create a fresh
+			// PeerConnection for the reconnect attempt.
+		} finally {
+			firstAlice.close();
+		}
+
+		// A truly fresh PeerConnection. bob's `acceptOffer` runs
+		// against a bob-side Session that doesn't exist yet — that's
+		// the path the bug used to break.
+		const secondAlice = new PeerConnection();
+		await secondAlice.startListening(0);
+		try {
+			const bobReceived: TextMessage[] = [];
+			const unsubMessage = bob.onMessage((msg) => {
+				if (msg.type === "text") bobReceived.push(msg);
+			});
+			const bobStates: string[] = [];
+			const unsubState = bob.onStateChange((s) => bobStates.push(s));
+
+			await secondAlice.connect("127.0.0.1", bob.getSignalingPort());
+
+			const secondReachConnected = await waitForCondition(
+				bobStates,
+				(s) => s === "connected",
+				10000,
+			);
+			expect(secondReachConnected).toBe(true);
+
+			secondAlice.send({
+				type: "text",
+				id: "second",
+				timestamp: Date.now(),
+				payload: { text: "second hello" },
+			});
+
+			const gotSecond = await waitForMatch(
+				bobReceived,
+				(m) => m.payload.text === "second hello",
+				8000,
+			);
+			expect(gotSecond).toBe(true);
+
+			unsubMessage();
+			unsubState();
+		} finally {
+			secondAlice.close();
+		}
+	}, 30000);
 });

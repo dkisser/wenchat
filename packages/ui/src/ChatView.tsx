@@ -1,37 +1,60 @@
-import type { Message } from "@wenchat/protocol";
 import { Box, Text } from "ink";
 
 export type ChatViewProps = {
-	messages: Message[];
-	localId: string;
+	/** Display lines already sliced to the visible window, oldest first. */
+	readonly lines: readonly string[];
+	/** Index of `lines[0]` in the full log — used only for stable React keys. */
+	readonly firstLineIndex?: number;
+	/** Messages that arrived while the user was scrolled up. */
+	readonly unread?: number;
+	/**
+	 * Outer height in terminal rows, borders included. Omit to size to
+	 * content (non-TTY output and tests, where there is nothing to pin).
+	 */
+	readonly height?: number;
 };
 
-export function ChatView({ messages, localId }: ChatViewProps) {
+/**
+ * Presentational chat viewport. All scrolling logic lives in `useChatScroll`;
+ * this component only draws the window it is handed.
+ */
+export function ChatView({ lines, firstLineIndex = 0, unread = 0, height }: ChatViewProps) {
+	const capacity = height === undefined ? lines.length : Math.max(height - 2, 1);
+
+	// The unread indicator takes over the last visible row instead of adding
+	// one. Adding a row would make the viewport height depend on `unread`,
+	// which in turn depends on the viewport height — a circular dependency.
+	// Dropping a line only ever happens while scrolled up, where the bottom
+	// line is not what the user is reading anyway.
+	const showIndicator = unread > 0;
+	const body =
+		showIndicator && lines.length >= capacity ? lines.slice(0, Math.max(capacity - 1, 0)) : lines;
+
 	return (
-		<Box flexDirection="column" borderStyle="single" paddingX={1} flexGrow={1}>
-			{messages.map((message) => (
-				<Text key={message.id}>{formatMessage(message, localId)}</Text>
+		<Box
+			flexDirection="column"
+			borderStyle="single"
+			paddingX={1}
+			height={height}
+			flexShrink={0}
+			flexGrow={height === undefined ? 1 : 0}
+			overflow="hidden"
+		>
+			{body.map((line, index) => (
+				// An empty <Text> renders zero rows in ink (render-node-to-output
+				// skips zero-length text), which would shrink the frame — so a
+				// blank line is drawn as a single space. Each visible line has a
+				// globally unique log index (`firstLineIndex + index`), so the
+				// key is stable across re-renders and no React reconciliation
+				// confusion is possible.
+				// biome-ignore lint/suspicious/noArrayIndexKey: keyed by global log index, not per-render array index
+				<Text key={firstLineIndex + index} wrap="truncate-end">
+					{line.length > 0 ? line : " "}
+				</Text>
 			))}
+			{showIndicator && (
+				<Text color="yellow">{`↓ ${unread} new message${unread === 1 ? "" : "s"}`}</Text>
+			)}
 		</Box>
 	);
-}
-
-function formatMessage(message: Message, localId: string): string {
-	// The CLI marks local-only system entries with `id: \`system-${randomUUID()}\``
-	// (see apps/cli/src/App.tsx). Detect that prefix ahead of the local/peer
-	// check so a system entry never accidentally collides with a peer's UUID
-	// prefix.
-	let prefix: "system" | "me" | "peer";
-	if (message.id.startsWith("system-")) {
-		prefix = "system";
-	} else {
-		prefix = message.id.startsWith(localId) ? "me" : "peer";
-	}
-	if (message.type === "text") {
-		return `[${prefix}] ${message.payload.text}`;
-	}
-	if (message.type === "file-start") {
-		return `[${prefix}] sending file: ${message.payload.fileName}`;
-	}
-	return `[${prefix}] ${message.type}`;
 }
