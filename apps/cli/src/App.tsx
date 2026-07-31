@@ -386,9 +386,7 @@ function resolveIncomingPeer(
 	);
 	if (match) return match;
 	const label =
-		signalingHost && signalingPort > 0
-			? `${signalingHost}:${signalingPort}`
-			: "unknown peer";
+		signalingHost && signalingPort > 0 ? `${signalingHost}:${signalingPort}` : "unknown peer";
 	return {
 		id: "incoming",
 		displayName: label,

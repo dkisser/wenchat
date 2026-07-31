@@ -1,6 +1,6 @@
+import { describe, expect, it } from "bun:test";
 import type { Message } from "@wenchat/protocol";
 import { render } from "ink-testing-library";
-import { describe, expect, it } from "bun:test";
 import { App } from "../src/App";
 
 describe("App", () => {
