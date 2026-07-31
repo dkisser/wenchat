@@ -6,7 +6,7 @@ import { DataTransport } from "./transport";
 const DATA_CHANNEL_LABEL = "wenchat";
 
 export class PeerConnection {
-	private pc: RTCPeerConnection;
+	private pc!: RTCPeerConnection;
 	private transport?: DataTransport;
 	private signaling: SignalingServer;
 	private messageListeners: Set<(message: Message) => void> = new Set();
@@ -18,30 +18,8 @@ export class PeerConnection {
 	private localSignalingHost = "127.0.0.1";
 
 	constructor() {
-		this.pc = new RTCPeerConnection({
-			iceServers: [],
-		});
 		this.signaling = new SignalingServer();
-
-		this.pc.onicecandidate = (event) => {
-			if (event.candidate && this.remoteHost && this.remotePort) {
-				this.signaling
-					.sendCandidate(this.remoteHost, this.remotePort, {
-						candidate: event.candidate.candidate,
-						sdpMid: event.candidate.sdpMid,
-						sdpMLineIndex: event.candidate.sdpMLineIndex,
-					})
-					.catch(() => {});
-			}
-		};
-
-		this.pc.ondatachannel = (event) => {
-			this.attachTransport(event.channel as unknown as RTCDataChannel);
-		};
-
-		this.pc.onconnectionstatechange = () => {
-			this.notifyStateChange(this.pc.connectionState);
-		};
+		this.recreatePc();
 	}
 
 	async startListening(signalingPort: number, signalingHost = "127.0.0.1"): Promise<void> {
@@ -62,6 +40,17 @@ export class PeerConnection {
 	async connect(peerHost: string, peerPort: number): Promise<void> {
 		this.remoteHost = peerHost;
 		this.remotePort = peerPort;
+
+		// If a previous connection finished (closed/failed/disconnected),
+		// the existing RTCPeerConnection cannot be reused — createOffer / ICE
+		// would no-op on a closed pc and the connection would hang. Rebuild
+		// it so the handshake runs on a live pc.
+		const terminal = new Set(["closed", "failed", "disconnected"]);
+		if (terminal.has(this.pc.connectionState)) {
+			this.recreatePc();
+		}
+
+		this.pendingCandidates = [];
 
 		const channel = this.pc.createDataChannel(DATA_CHANNEL_LABEL);
 		this.attachTransport(channel as unknown as RTCDataChannel);
@@ -127,6 +116,39 @@ export class PeerConnection {
 		this.transport?.close();
 		this.pc.close();
 		this.signaling.stop().catch(() => {});
+	}
+
+	private recreatePc(): void {
+		// Close any previous transport cleanly so the underlying
+		// RTCDataChannel isn't leaked across reconnects.
+		if (this.transport) {
+			this.transport.close();
+			this.transport = undefined;
+		}
+
+		this.pc = new RTCPeerConnection({
+			iceServers: [],
+		});
+
+		this.pc.onicecandidate = (event) => {
+			if (event.candidate && this.remoteHost && this.remotePort) {
+				this.signaling
+					.sendCandidate(this.remoteHost, this.remotePort, {
+						candidate: event.candidate.candidate,
+						sdpMid: event.candidate.sdpMid,
+						sdpMLineIndex: event.candidate.sdpMLineIndex,
+					})
+					.catch(() => {});
+			}
+		};
+
+		this.pc.ondatachannel = (event) => {
+			this.attachTransport(event.channel as unknown as RTCDataChannel);
+		};
+
+		this.pc.onconnectionstatechange = () => {
+			this.notifyStateChange(this.pc.connectionState);
+		};
 	}
 
 	private attachTransport(channel: RTCDataChannel): void {

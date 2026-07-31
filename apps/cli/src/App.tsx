@@ -45,7 +45,7 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 		discovery.onPeersUpdated(setPeers);
 		discovery.start(displayName, signalingPort, signalingHost).catch(() => {});
 		peerConnection.startListening(signalingPort, signalingHost).catch(() => {});
-		peerConnection.onMessage((message) => {
+		const unsubscribeMessage = peerConnection.onMessage((message) => {
 			setMessages((prev) => [...prev, message]);
 
 			if (message.type === "file-start") {
@@ -63,13 +63,20 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 				}
 			}
 		});
-		peerConnection.onStateChange((state) => {
+		const unsubscribeState = peerConnection.onStateChange((state) => {
 			if (state === "connected") setStatus("online");
 			else if (state === "connecting") setStatus("connecting");
-			else setStatus("offline");
+			else {
+				setStatus("offline");
+				// Drop the stale peer name so StatusBar doesn't keep showing
+				// "Offline • <oldPeer>" after the peer goes away.
+				setSelectedPeer(null);
+			}
 		});
 
 		return () => {
+			unsubscribeMessage();
+			unsubscribeState();
 			fileReceiverRef.current.clear();
 			discovery.stop().catch(() => {});
 			peerConnection.close();
@@ -205,10 +212,15 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 	return (
 		<Box flexDirection="column" height="100%">
 			<StatusBar status={status} peerName={selectedPeer?.displayName} />
-			<Box flexDirection="row" flexGrow={1}>
-				<PeerList peers={peers} onSelect={handleSelectPeer} />
-				<ChatView messages={messages} localId={localId} />
-			</Box>
+			{status === "offline" ? (
+				<Box flexDirection="row" flexGrow={1}>
+					<PeerList peers={peers} onSelect={handleSelectPeer} />
+				</Box>
+			) : (
+				<Box flexDirection="row" flexGrow={1}>
+					<ChatView messages={messages} localId={localId} />
+				</Box>
+			)}
 			<CommandSuggestion partial={inputText} />
 			<InputBox
 				value={inputText}
