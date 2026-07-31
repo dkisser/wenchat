@@ -44,12 +44,12 @@ There is no `bun run check`; `biome` only lints, it does not typecheck.
 - **Named exports only**, no default exports
 - **Type-only imports** for types
 - Strict TS is on: `noUnusedLocals`, `noUnusedParameters`, `noImplicitReturns`, `noFallthroughCasesInSwitch`
-- Per-package `tsconfig.json` excludes `src/**/*.test.ts(x)` from build output
+- Per-package `tsconfig.json` excludes `src/**/*.test.ts(x)` from build output (no-op after the per-package `tests/` migration, kept defensively)
 - Logger: `pino` (used in `@wenchat/core` and `@wenchat/cli`); avoid `console.log` in app/package source
 
 ## Testing
 
-- Bun's built-in test runner; tests live next to source as `*.test.ts` / `*.test.tsx`
+- Bun's built-in test runner; tests live under each package's `tests/` directory, mirroring the source tree: `apps/cli/tests/` (no subdirs), `packages/core/tests/{unit,integration}/`, `packages/protocol/tests/`, `packages/ui/tests/{components,helpers}/`. Filename is `*.test.ts` / `*.test.tsx`. Tests reference production code via relative path (e.g. `../../src/peer`) or the existing workspace aliases (`@wenchat/protocol`).
 - React/Ink components use `ink-testing-library`
 - Integration tests wire two `PeerConnection`s on 127.0.0.1 with `setInterval` polls — slow by design (~5s timeouts)
 
