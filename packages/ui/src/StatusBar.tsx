@@ -4,9 +4,15 @@ export type StatusBarProps = {
 	status: "offline" | "connecting" | "online";
 	peerName?: string;
 	peerEndpoint?: string;
+	/**
+	 * True while the terminal is reporting mouse events to the app. When
+	 * false the host terminal handles drag-to-select natively, so we show
+	 * a hint reminding the user how to flip back to wheel-scroll mode.
+	 */
+	mouseEnabled?: boolean;
 };
 
-export function StatusBar({ status, peerName, peerEndpoint }: StatusBarProps) {
+export function StatusBar({ status, peerName, peerEndpoint, mouseEnabled = true }: StatusBarProps) {
 	const statusText = {
 		offline: "Offline",
 		connecting: "Connecting...",
@@ -25,6 +31,7 @@ export function StatusBar({ status, peerName, peerEndpoint }: StatusBarProps) {
 	return (
 		<Box paddingLeft={1}>
 			<Text color={color}>{statusText[status]}</Text>
+			{!mouseEnabled && <Text color="gray">{`  • Select mode (Alt+M to scroll)`}</Text>}
 		</Box>
 	);
 }

@@ -50,6 +50,31 @@ export function exitMouseMode(): void {
 }
 
 /**
+ * True if mouse reporting is currently enabled. Used by the UI to render a
+ * "Select mode" indicator when the user has disabled tracking so they can
+ * drag-select text natively.
+ */
+export function isMouseModeEnabled(): boolean {
+	return entered;
+}
+
+/**
+ * Flip mouse tracking on or off, returning the new state (true = enabled).
+ *
+ * The "off" state lets the host terminal handle drag-to-select natively,
+ * which is otherwise suppressed while tracking is on. The user toggles
+ * this with the Alt+M hotkey from the App when they want to copy text out
+ * of the chat log without losing the wheel-scroll convenience long-term.
+ */
+export function toggleMouseMode(): boolean {
+	if (entered) {
+		exitMouseMode();
+		return false;
+	}
+	return enterMouseMode();
+}
+
+/**
  * Test-only: reset internal state without writing any escape sequences.
  */
 export function __resetMouseModeForTests(): void {

@@ -150,6 +150,26 @@ export class PeerConnection {
 	close(): void {
 		// Detach forwarders BEFORE closing the session so a "closed"
 		// event fired during teardown doesn't reach our listeners.
+		this.detachActiveSession();
+		this.signaling.stop().catch(() => {});
+	}
+
+	/**
+	 * Close the active session (if any) without tearing down the signaling
+	 * server. After this returns, the peer can still place outgoing calls
+	 * via {@link connect} or accept incoming offers. Safe to call when no
+	 * session is active — it's a no-op in that case.
+	 *
+	 * Detaches the forwarders BEFORE closing the session so a "closed" event
+	 * fired during async pc teardown doesn't reach our listeners (which
+	 * would otherwise flip the local UI to "Lost connection to …" for a
+	 * disconnect the local user just initiated).
+	 */
+	disconnect(): void {
+		this.detachActiveSession();
+	}
+
+	private detachActiveSession(): void {
 		for (const unsubscribe of this.sessionUnsubscribers) {
 			unsubscribe();
 		}
@@ -157,8 +177,6 @@ export class PeerConnection {
 
 		this.session?.close();
 		this.session = undefined;
-
-		this.signaling.stop().catch(() => {});
 	}
 
 	/**

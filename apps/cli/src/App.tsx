@@ -23,8 +23,9 @@ import {
 	useChatScroll,
 	useTerminalSize,
 } from "@wenchat/ui";
-import { Box, useApp } from "ink";
+import { Box, useApp, useInput } from "ink";
 import { useEffect, useRef, useState } from "react";
+import { isMouseModeEnabled, toggleMouseMode } from "./mouseMode";
 
 export type AppProps = {
 	displayName: string;
@@ -52,11 +53,23 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	const [status, setStatus] = useState<"offline" | "connecting" | "online">("offline");
 	const [selectedPeer, setSelectedPeer] = useState<PeerInfo | null>(null);
 	const [inputText, setInputText] = useState("");
+	// `main.tsx` may have already entered mouse mode (TTY, no `--no-mouse`);
+	// seed React state from the actual terminal state so the first render
+	// matches reality instead of always rendering "Select mode".
+	const [mouseEnabled, setMouseEnabled] = useState(() => isMouseModeEnabled());
 	const [localId] = useState(() => randomUUID());
 
 	const [discovery] = useState(() => new DiscoveryService());
 	const [peerConnection] = useState(() => new PeerConnection());
 	const fileReceiverRef = useRef(new FileReceiver());
+
+	// Monotonic counter incremented on every connect/disconnect. Each
+	// in-flight `connect()` captures its own generation and bails out
+	// (without swapping in its session or surfacing errors) if a later
+	// generation has been started — otherwise a `/disconnect` issued while
+	// a handshake is in flight could be silently undone when the late
+	// `await` resolves and re-installs the session under our feet.
+	const connectionGenerationRef = useRef(0);
 
 	// Mirror `selectedPeer` into a ref so that the long-lived `onStateChange`
 	// closure — which is registered once on mount — always sees the latest
@@ -75,6 +88,18 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	useEffect(() => {
 		peersRef.current = peers;
 	}, [peers]);
+
+	// Alt+M toggles mouse reporting at the terminal level. While tracking
+	// is on the host terminal swallows drag-select, so users flip it off
+	// (and back on) to copy text out of the chat log. The InputBox's
+	// useInput only consumes non-meta keys, so this listener gets a clear
+	// shot at Alt/Meta combos without colliding with text entry.
+	useInput((input, key) => {
+		if (!key.meta || !input) return;
+		if (input.toLowerCase() !== "m") return;
+		toggleMouseMode();
+		setMouseEnabled(isMouseModeEnabled());
+	});
 
 	useEffect(() => {
 		discovery.onPeersUpdated(setPeers);
@@ -160,11 +185,25 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	}, [discovery, displayName, peerConnection, signalingPort, signalingHost]);
 
 	const handleSelectPeer = async (peer: PeerInfo) => {
+		// Re-selecting a peer (or any other peer) while already connected
+		// would have flipped the status to "connecting" and torn down the
+		// live session inside `peerConnection.connect()`. Reject the click
+		// and ask the user to /disconnect first so the active chat isn't
+		// silently dropped on them.
+		if (status === "online" || status === "connecting") {
+			appendSystemMessage(
+				`Already connected. Run /disconnect first to switch peer.`,
+			);
+			return;
+		}
 		setSelectedPeer(peer);
 		setStatus("connecting");
+		const myGeneration = ++connectionGenerationRef.current;
 		try {
 			await peerConnection.connect(peer.signalingHost, peer.signalingPort);
+			if (connectionGenerationRef.current !== myGeneration) return;
 		} catch {
+			if (connectionGenerationRef.current !== myGeneration) return;
 			setStatus("offline");
 		}
 	};
@@ -229,10 +268,52 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	};
 
 	const handleHelp = () => {
-		appendSystemMessage("Magic commands: /exit, /file <path>, /help, /connect <host:port>");
+		appendSystemMessage(
+			"Magic commands: /exit, /disconnect, /file <path>, /help, /connect <host:port>",
+		);
+	};
+
+	const handleDisconnect = () => {
+		// Bump the generation BEFORE the synchronous state reset so any
+		// in-flight `connect()` await sees a stale token and bails out
+		// without re-installing its session under us.
+		connectionGenerationRef.current++;
+		const peer = selectedPeerRef.current;
+		if (!peer) {
+			appendSystemMessage("Not connected");
+			return;
+		}
+		// Tear down the active session but leave the signaling server up so
+		// the user can dial out (or accept an offer) again. The remote peer
+		// observes the close on its pc and its own listener emits
+		// "Lost connection to …" — this side emits the matching
+		// "Disconnected from …" so both sides see a notice.
+		peerConnection.disconnect();
+		setStatus("offline");
+		setSelectedPeer(null);
+		const endpoint = `${peer.signalingHost}:${peer.signalingPort}`;
+		const text =
+			peer.id === "manual"
+				? `Disconnected from ${endpoint}`
+				: `Disconnected from ${peer.displayName} (${endpoint})`;
+		appendSystemMessage(text);
 	};
 
 	const handleExit = () => {
+		// Emit the disconnect notice FIRST so the local chat log records the
+		// close, mirroring what the remote peer will see via its own
+		// onStateChange("closed") handler. The teardown that follows
+		// (peerConnection.close + exit) detaches the listeners so this
+		// doesn't race with the "Lost connection to …" path on the way out.
+		const peer = selectedPeerRef.current;
+		if (peer) {
+			const endpoint = `${peer.signalingHost}:${peer.signalingPort}`;
+			const text =
+				peer.id === "manual"
+					? `Disconnected from ${endpoint}`
+					: `Disconnected from ${peer.displayName} (${endpoint})`;
+			appendSystemMessage(text);
+		}
 		peerConnection.close();
 		discovery.stop().catch(() => {});
 		// Ink's `exit()` triggers App's componentWillUnmount → final onRender
@@ -247,6 +328,12 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	};
 
 	const handleConnect = async (hostPort: string) => {
+		if (status === "online" || status === "connecting") {
+			appendSystemMessage(
+				`Already connected. Run /disconnect first to switch peer.`,
+			);
+			return;
+		}
 		const lastColon = hostPort.lastIndexOf(":");
 		if (lastColon <= 0 || lastColon === hostPort.length - 1) {
 			appendSystemMessage(`Invalid /connect argument: expected <host:port>, got "${hostPort}"`);
@@ -265,9 +352,12 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			signalingPort: port,
 		});
 		setStatus("connecting");
+		const myGeneration = ++connectionGenerationRef.current;
 		try {
 			await peerConnection.connect(host, port);
+			if (connectionGenerationRef.current !== myGeneration) return;
 		} catch {
+			if (connectionGenerationRef.current !== myGeneration) return;
 			setStatus("offline");
 			appendSystemMessage(`Failed to connect to ${hostPort}`);
 		}
@@ -277,6 +367,9 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		switch (name) {
 			case "exit":
 				handleExit();
+				return;
+			case "disconnect":
+				handleDisconnect();
 				return;
 			case "file":
 				void handleFile(arg);
@@ -330,6 +423,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 					peerEndpoint={
 						selectedPeer ? `${selectedPeer.signalingHost}:${selectedPeer.signalingPort}` : undefined
 					}
+					mouseEnabled={mouseEnabled}
 				/>
 			</Box>
 			{status === "offline" && messages.length === 0 ? (

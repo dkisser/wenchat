@@ -94,7 +94,7 @@ export function InputBox({
 			if (value.length > 0) {
 				const parsed = parseCommand(value);
 				if (parsed) {
-					const known = ["exit", "file", "help", "connect"];
+					const known = ["exit", "file", "help", "connect", "disconnect"];
 					if (known.includes(parsed.name)) {
 						onCommand(parsed.name, parsed.arg);
 					} else {

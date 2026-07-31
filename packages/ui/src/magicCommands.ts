@@ -25,6 +25,11 @@ export const MAGIC_COMMANDS: readonly CommandSpec[] = Object.freeze([
 		description: "connect to a peer manually",
 		usage: "/connect <host:port>",
 	},
+	{
+		name: "disconnect",
+		description: "disconnect from the current peer without quitting",
+		usage: "/disconnect",
+	},
 ]);
 
 export type ParsedCommand = {
