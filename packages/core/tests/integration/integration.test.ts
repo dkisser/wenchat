@@ -209,4 +209,25 @@ describe("core integration", () => {
 			secondAlice.close();
 		}
 	}, 30000);
+
+	it("receiver's onIncoming fires before onStateChange('connected')", async () => {
+		const bobEvents: string[] = [];
+		bob.onIncoming(() => bobEvents.push("incoming"));
+		bob.onStateChange((s) => bobEvents.push(`state:${s}`));
+
+		await alice.connect("127.0.0.1", bob.getSignalingPort());
+
+		const reachedConnected = await waitForCondition(
+			bobEvents,
+			(e) => e === "state:connected",
+			5000,
+		);
+		expect(reachedConnected).toBe(true);
+
+		const incomingIdx = bobEvents.indexOf("incoming");
+		const connectedIdx = bobEvents.indexOf("state:connected");
+		expect(incomingIdx).toBeGreaterThanOrEqual(0);
+		expect(connectedIdx).toBeGreaterThanOrEqual(0);
+		expect(incomingIdx).toBeLessThan(connectedIdx);
+	});
 });

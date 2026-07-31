@@ -3,6 +3,22 @@ import { Session } from "./session";
 import { type IceCandidatePayload, type SdpPayload, SignalingServer } from "./signaling";
 
 /**
+ * Information surfaced to app code when a remote peer sends an offer
+ * to our signaling server (i.e. we are the receiver).
+ *
+ * `signalingHost` / `signalingPort` come straight from the offer
+ * payload's `signalingHost` / `signalingPort` fields — the initiator
+ * populated them so it could be reached for ICE candidate exchange.
+ * If the offer carried no endpoint (older protocol), both fields are
+ * the empty / zero defaults; app code is responsible for deciding how
+ * to label an unidentified peer.
+ */
+export type IncomingOfferInfo = {
+	readonly signalingHost: string;
+	readonly signalingPort: number;
+};
+
+/**
  * LAN-only peer connection.
  *
  * Owns the long-lived signaling server (process-lifetime) and a single
@@ -31,6 +47,7 @@ export class PeerConnection {
 
 	private messageListeners: Set<(message: Message) => void> = new Set();
 	private stateListeners: Set<(state: string) => void> = new Set();
+	private incomingListeners: Set<(info: IncomingOfferInfo) => void> = new Set();
 
 	// The host:port we tell the remote peer to use when signaling back
 	// to us. Defaults to loopback but LAN-mode callers override it.
@@ -45,6 +62,22 @@ export class PeerConnection {
 		await this.signaling.start(signalingPort, signalingHost);
 
 		this.signaling.onOffer(async (offer) => {
+			// Fire incoming listeners SYNCHRONOUSLY before awaiting
+			// Session.accept. App code uses this to seed `selectedPeer`
+			// ahead of the WebRTC `connected` state so the
+			// "Connected to …" system-message path sees a peer and the
+			// StatusBar carries the peer's name. Firing after
+			// `Session.accept` would let werift schedule
+			// `onconnectionstatechange` first, racing the React state
+			// update and producing a silent receiver.
+			const info: IncomingOfferInfo = {
+				signalingHost: offer.signalingHost ?? "",
+				signalingPort: offer.signalingPort ?? 0,
+			};
+			for (const listener of this.incomingListeners) {
+				listener(info);
+			}
+
 			const newSession = await Session.accept({
 				signaling: this.signaling,
 				localHost: this.localSignalingHost,
@@ -97,6 +130,20 @@ export class PeerConnection {
 		this.stateListeners.add(callback);
 		return () => {
 			this.stateListeners.delete(callback);
+		};
+	}
+
+	/**
+	 * Fired synchronously inside the signaling `/offer` handler, before
+	 * `Session.accept` resolves. Carries the initiator's signaling
+	 * endpoint (from the offer payload) so app code can identify the
+	 * remote peer and prepare UI state ahead of the WebRTC `connected`
+	 * event.
+	 */
+	onIncoming(callback: (info: IncomingOfferInfo) => void): () => void {
+		this.incomingListeners.add(callback);
+		return () => {
+			this.incomingListeners.delete(callback);
 		};
 	}
 

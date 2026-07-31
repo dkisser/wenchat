@@ -30,6 +30,12 @@ export type AppProps = {
 	displayName: string;
 	signalingPort: number;
 	signalingHost: string;
+	/**
+	 * Test-only: seed the chat log with an initial message so render
+	 * branches that depend on `messages.length` can be asserted in
+	 * isolation. Defaults to empty.
+	 */
+	initialMessages?: readonly Message[];
 };
 
 /**
@@ -39,10 +45,10 @@ export type AppProps = {
  */
 const MAX_MESSAGES = 2000;
 
-export function App({ displayName, signalingPort, signalingHost }: AppProps) {
+export function App({ displayName, signalingPort, signalingHost, initialMessages = [] }: AppProps) {
 	const { exit } = useApp();
 	const [peers, setPeers] = useState<PeerInfo[]>([]);
-	const [messages, setMessages] = useState<Message[]>([]);
+	const [messages, setMessages] = useState<Message[]>([...initialMessages]);
 	const [status, setStatus] = useState<"offline" | "connecting" | "online">("offline");
 	const [selectedPeer, setSelectedPeer] = useState<PeerInfo | null>(null);
 	const [inputText, setInputText] = useState("");
@@ -62,10 +68,35 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 		selectedPeerRef.current = selectedPeer;
 	}, [selectedPeer]);
 
+	// Same mirror for the discovery list: the long-lived `onIncoming`
+	// closure (registered once on mount) needs the latest `peers` to look
+	// up an incoming connection against the mDNS-discovered roster.
+	const peersRef = useRef<PeerInfo[]>([]);
+	useEffect(() => {
+		peersRef.current = peers;
+	}, [peers]);
+
 	useEffect(() => {
 		discovery.onPeersUpdated(setPeers);
 		discovery.start(displayName, signalingPort, signalingHost).catch(() => {});
 		peerConnection.startListening(signalingPort, signalingHost).catch(() => {});
+		const unsubscribeIncoming = peerConnection.onIncoming(({ signalingHost, signalingPort }) => {
+			// Receiver side: someone is dialing us. Resolve the
+			// signaling endpoint to a PeerInfo (either a discovered
+			// peer or a synthetic fallback), seed both the ref and
+			// the React state so the upcoming `onStateChange("connected")`
+			// branch sees a peer, and flip status to "connecting" for
+			// parity with the initiator's path. Writing
+			// `selectedPeerRef.current` synchronously here closes the
+			// race with werift's async `onconnectionstatechange`.
+			// TODO: multi-session handoff — if a session is already
+			// active when a new offer arrives, the outgoing session's
+			// terminal event will fire under the new peer's identity.
+			const peer = resolveIncomingPeer(peersRef.current, signalingHost, signalingPort);
+			selectedPeerRef.current = peer;
+			setSelectedPeer(peer);
+			setStatus("connecting");
+		});
 		const unsubscribeMessage = peerConnection.onMessage((message) => {
 			setMessages((prev) => appendCapped(prev, message));
 
@@ -119,6 +150,7 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 		});
 
 		return () => {
+			unsubscribeIncoming();
 			unsubscribeMessage();
 			unsubscribeState();
 			fileReceiverRef.current.clear();
@@ -144,7 +176,16 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 			timestamp: Date.now(),
 			payload: { text },
 		};
-		peerConnection.send(message);
+		try {
+			peerConnection.send(message);
+		} catch {
+			// No active session — typically the remote side already
+			// /exited. Surface this as a system message instead of
+			// letting the throw escape the React event callback and
+			// tear down the Ink render tree.
+			appendSystemMessage("Not connected");
+			return;
+		}
 		setMessages((prev) => appendCapped(prev, message));
 	};
 
@@ -265,9 +306,11 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 		localId,
 		contentWidth: layout.contentWidth,
 		viewportHeight: layout.viewportHeight,
-		// The chat is swapped out for the peer list while offline; leaving the
-		// scroll keys inactive there keeps arrow handling unambiguous.
-		isActive: status !== "offline",
+		// Scroll keys stay active whenever the ChatView is on screen —
+		// including the post-disconnect case where `status` is "offline"
+		// but `messages.length > 0` keeps the history visible. The
+		// PeerList path still gets inactive scroll input.
+		isActive: status !== "offline" || messages.length > 0,
 	});
 
 	return (
@@ -289,7 +332,7 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 					}
 				/>
 			</Box>
-			{status === "offline" ? (
+			{status === "offline" && messages.length === 0 ? (
 				<PeerList peers={peers} onSelect={handleSelectPeer} height={layout.chatOuterHeight} />
 			) : (
 				<ChatView
@@ -323,6 +366,35 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 function appendCapped(previous: readonly Message[], message: Message): Message[] {
 	const next = [...previous, message];
 	return next.length > MAX_MESSAGES ? next.slice(next.length - MAX_MESSAGES) : next;
+}
+
+/**
+ * Resolve a PeerInfo for an incoming offer's signaling endpoint.
+ * Matches on strict (signalingHost, signalingPort) equality against
+ * the current discovery list. If no entry matches, returns a synthetic
+ * PeerInfo so the UI can still name the connection — `"<host>:<port>"`
+ * if we have an endpoint, otherwise `"unknown peer"` (older initiator
+ * that didn't populate the offer's signalingHost/Port).
+ */
+function resolveIncomingPeer(
+	peers: readonly PeerInfo[],
+	signalingHost: string,
+	signalingPort: number,
+): PeerInfo {
+	const match = peers.find(
+		(p) => p.signalingHost === signalingHost && p.signalingPort === signalingPort,
+	);
+	if (match) return match;
+	const label =
+		signalingHost && signalingPort > 0
+			? `${signalingHost}:${signalingPort}`
+			: "unknown peer";
+	return {
+		id: "incoming",
+		displayName: label,
+		signalingHost,
+		signalingPort,
+	};
 }
 
 function getErrorMessage(error: unknown): string {
