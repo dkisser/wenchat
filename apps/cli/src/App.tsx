@@ -41,6 +41,16 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 	const [peerConnection] = useState(() => new PeerConnection());
 	const fileReceiverRef = useRef(new FileReceiver());
 
+	// Mirror `selectedPeer` into a ref so that the long-lived `onStateChange`
+	// closure — which is registered once on mount — always sees the latest
+	// peer info when emitting "Connected to …" / "Lost connection to …"
+	// system messages. Without this, the closure would capture whichever peer
+	// was selected at mount time (typically null) and never observe clicks.
+	const selectedPeerRef = useRef<PeerInfo | null>(null);
+	useEffect(() => {
+		selectedPeerRef.current = selectedPeer;
+	}, [selectedPeer]);
+
 	useEffect(() => {
 		discovery.onPeersUpdated(setPeers);
 		discovery.start(displayName, signalingPort, signalingHost).catch(() => {});
@@ -64,10 +74,33 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 			}
 		});
 		const unsubscribeState = peerConnection.onStateChange((state) => {
-			if (state === "connected") setStatus("online");
-			else if (state === "connecting") setStatus("connecting");
-			else {
+			const peer = selectedPeerRef.current;
+			if (state === "connected") {
+				setStatus("online");
+				if (peer) {
+					const endpoint = `${peer.signalingHost}:${peer.signalingPort}`;
+					const text =
+						peer.id === "manual"
+							? `Connected to ${endpoint}`
+							: `Connected to ${peer.displayName} (${endpoint})`;
+					appendSystemMessage(text);
+				}
+			} else if (state === "connecting") {
+				setStatus("connecting");
+			} else {
+				// Terminal state (disconnected/closed/failed). PeerConnection
+				// guards with a `terminated` flag so we only see one of these
+				// per connection attempt, so it's safe to emit a system
+				// message every time.
 				setStatus("offline");
+				if (peer) {
+					const endpoint = `${peer.signalingHost}:${peer.signalingPort}`;
+					const text =
+						peer.id === "manual"
+							? `Lost connection to ${endpoint}`
+							: `Lost connection to ${peer.displayName} (${endpoint})`;
+					appendSystemMessage(text);
+				}
 				// Drop the stale peer name so StatusBar doesn't keep showing
 				// "Offline • <oldPeer>" after the peer goes away.
 				setSelectedPeer(null);
@@ -211,7 +244,13 @@ export function App({ displayName, signalingPort, signalingHost }: AppProps) {
 
 	return (
 		<Box flexDirection="column" height="100%">
-			<StatusBar status={status} peerName={selectedPeer?.displayName} />
+			<StatusBar
+				status={status}
+				peerName={selectedPeer?.displayName}
+				peerEndpoint={
+					selectedPeer ? `${selectedPeer.signalingHost}:${selectedPeer.signalingPort}` : undefined
+				}
+			/>
 			{status === "offline" ? (
 				<Box flexDirection="row" flexGrow={1}>
 					<PeerList peers={peers} onSelect={handleSelectPeer} />

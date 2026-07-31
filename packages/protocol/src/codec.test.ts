@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { decode, encode } from "./codec";
-import type { TextMessage } from "./message";
+import type { PingMessage, PongMessage, TextMessage } from "./message";
 
 describe("codec", () => {
 	it("encodes and decodes a text message", () => {
@@ -12,6 +12,30 @@ describe("codec", () => {
 		};
 		const encoded = encode(original);
 		const decoded = decode(encoded) as TextMessage;
+		expect(decoded).toEqual(original);
+	});
+
+	it("encodes and decodes a ping message", () => {
+		const original: PingMessage = {
+			type: "ping",
+			id: "p1",
+			timestamp: 1,
+			payload: { nonce: "abc" },
+		};
+		const encoded = encode(original);
+		const decoded = decode(encoded) as PingMessage;
+		expect(decoded).toEqual(original);
+	});
+
+	it("encodes and decodes a pong message", () => {
+		const original: PongMessage = {
+			type: "pong",
+			id: "po1",
+			timestamp: 2,
+			payload: { nonce: "abc" },
+		};
+		const encoded = encode(original);
+		const decoded = decode(encoded) as PongMessage;
 		expect(decoded).toEqual(original);
 	});
 

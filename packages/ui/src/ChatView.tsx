@@ -17,7 +17,16 @@ export function ChatView({ messages, localId }: ChatViewProps) {
 }
 
 function formatMessage(message: Message, localId: string): string {
-	const prefix = message.id.startsWith(localId) ? "me" : "peer";
+	// The CLI marks local-only system entries with `id: \`system-${randomUUID()}\``
+	// (see apps/cli/src/App.tsx). Detect that prefix ahead of the local/peer
+	// check so a system entry never accidentally collides with a peer's UUID
+	// prefix.
+	let prefix: "system" | "me" | "peer";
+	if (message.id.startsWith("system-")) {
+		prefix = "system";
+	} else {
+		prefix = message.id.startsWith(localId) ? "me" : "peer";
+	}
 	if (message.type === "text") {
 		return `[${prefix}] ${message.payload.text}`;
 	}

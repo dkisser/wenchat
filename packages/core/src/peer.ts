@@ -1,5 +1,6 @@
 import type { Message } from "@wenchat/protocol";
 import { type RTCDataChannel, RTCIceCandidate, RTCPeerConnection } from "werift";
+import { HeartbeatScheduler } from "./heartbeat";
 import { type IceCandidatePayload, type SdpPayload, SignalingServer } from "./signaling";
 import { DataTransport } from "./transport";
 
@@ -14,6 +15,11 @@ export class PeerConnection {
 	private pendingCandidates: IceCandidatePayload[] = [];
 	private remoteHost?: string;
 	private remotePort?: number;
+	private heartbeat?: HeartbeatScheduler;
+	// Once a terminal WebRTC state has been observed (or our heartbeat fired),
+	// we suppress subsequent terminal emissions so listeners see at most one
+	// `disconnected`/`closed`/`failed` per connection attempt.
+	private terminated = false;
 
 	private localSignalingHost = "127.0.0.1";
 
@@ -113,6 +119,10 @@ export class PeerConnection {
 	}
 
 	close(): void {
+		// Local graceful close: stop the heartbeat first so its watchdog
+		// doesn't fire AFTER we've already torn everything down. The natural
+		// WebRTC `closed` will still propagate.
+		this.stopHeartbeat();
 		this.transport?.close();
 		this.pc.close();
 		this.signaling.stop().catch(() => {});
@@ -125,6 +135,8 @@ export class PeerConnection {
 			this.transport.close();
 			this.transport = undefined;
 		}
+		this.stopHeartbeat();
+		this.terminated = false;
 
 		this.pc = new RTCPeerConnection({
 			iceServers: [],
@@ -149,11 +161,24 @@ export class PeerConnection {
 		this.pc.onconnectionstatechange = () => {
 			this.notifyStateChange(this.pc.connectionState);
 		};
+
+		// A fresh heartbeat per pc — its timers are tied to this connection's
+		// lifecycle, so a reconnect gets a clean slate.
+		this.heartbeat = new HeartbeatScheduler({
+			send: (msg) => this.send(msg),
+			onTimeout: () => this.failByHeartbeat(),
+		});
 	}
 
 	private attachTransport(channel: RTCDataChannel): void {
 		this.transport = new DataTransport(channel);
 		this.transport.onMessage((message) => {
+			// Heartbeat traffic is the only thing we filter out before the
+			// user-facing fan-out. DataTransport stays a dumb JSON pipe.
+			if (message.type === "ping" || message.type === "pong") {
+				this.heartbeat?.handleIncoming(message);
+				return;
+			}
 			this.notifyMessage(message);
 		});
 	}
@@ -179,8 +204,41 @@ export class PeerConnection {
 	}
 
 	private notifyStateChange(state: string): void {
+		if (state === "connected") {
+			this.heartbeat?.start();
+		}
+		if (state === "disconnected" || state === "closed" || state === "failed") {
+			if (this.terminated) {
+				// Already terminated (heartbeat path closed the pc). Suppress
+				// duplicate terminal events so listeners see one offline event.
+				this.stopHeartbeat();
+				return;
+			}
+			this.terminated = true;
+			this.stopHeartbeat();
+		}
 		for (const listener of this.stateListeners) {
 			listener(state);
+		}
+	}
+
+	private stopHeartbeat(): void {
+		if (this.heartbeat) {
+			this.heartbeat.stop();
+		}
+	}
+
+	private failByHeartbeat(): void {
+		if (this.terminated) return;
+		this.terminated = true;
+		this.stopHeartbeat();
+		try {
+			this.pc.close();
+		} catch {
+			// pc.close() is idempotent — ignore double-close.
+		}
+		for (const listener of this.stateListeners) {
+			listener("disconnected");
 		}
 	}
 }

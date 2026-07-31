@@ -1,6 +1,6 @@
 import type { Message } from "./message";
 
-const MESSAGE_TYPES = new Set(["text", "file-start", "file-chunk", "file-end"]);
+const MESSAGE_TYPES = new Set(["text", "file-start", "file-chunk", "file-end", "ping", "pong"]);
 
 /**
  * Deep-walk a value, converting every Uint8Array (including Node Buffers,
