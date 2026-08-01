@@ -86,7 +86,10 @@ describe("PeerConnection", () => {
 				// fire a terminal event into the listener.
 				await new Promise((resolve) => setTimeout(resolve, 50));
 
-				expect(states).toEqual(["connecting", "connected"]);
+				// The initiator side never emits a "connecting" state — it
+				// jumps straight to "connected" once the answer SDP lands —
+				// so the expected sequence is just the single connected.
+				expect(states).toEqual(["connected"]);
 			} finally {
 				alice.close();
 				bob.close();

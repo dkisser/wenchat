@@ -48,12 +48,13 @@ describe("parseCommand", () => {
 });
 
 describe("MAGIC_COMMANDS", () => {
-	it("includes exit, file, help, connect", () => {
+	it("includes exit, file, help, connect, disconnect", () => {
 		const names = MAGIC_COMMANDS.map((c) => c.name);
 		expect(names).toContain("exit");
 		expect(names).toContain("file");
 		expect(names).toContain("help");
 		expect(names).toContain("connect");
+		expect(names).toContain("disconnect");
 	});
 
 	it("is frozen", () => {

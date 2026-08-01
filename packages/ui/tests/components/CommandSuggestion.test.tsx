@@ -21,6 +21,8 @@ describe("CommandSuggestion", () => {
 		expect(frame).toContain("/file");
 		expect(frame).toContain("/help");
 		expect(frame).toContain("/connect");
+		expect(frame).toContain("/disconnect");
+		expect(frame).toContain("/mouse");
 	});
 
 	it("filters commands by prefix", () => {
@@ -43,6 +45,8 @@ describe("CommandSuggestion", () => {
 		expect(frame).toContain("list");
 		expect(frame).toContain("send");
 		expect(frame).toContain("manual");
+		expect(frame).toContain("disconnect");
+		expect(frame).toContain("toggle");
 	});
 });
 

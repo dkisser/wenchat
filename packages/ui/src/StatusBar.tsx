@@ -31,7 +31,7 @@ export function StatusBar({ status, peerName, peerEndpoint, mouseEnabled = true 
 	return (
 		<Box paddingLeft={1}>
 			<Text color={color}>{statusText[status]}</Text>
-			{!mouseEnabled && <Text color="gray">{`  • Select mode (Alt+M to scroll)`}</Text>}
+			{!mouseEnabled && <Text color="gray">{"  • Select mode (Ctrl+T or /mouse to scroll)"}</Text>}
 		</Box>
 	);
 }

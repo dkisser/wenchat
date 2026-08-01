@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import process from "node:process";
-import { __resetMouseModeForTests, enterMouseMode, exitMouseMode } from "../src/mouseMode";
+import {
+	__resetMouseModeForTests,
+	enterMouseMode,
+	exitMouseMode,
+	isMouseModeEnabled,
+	toggleMouseMode,
+} from "../src/mouseMode";
 
 const ENABLE_MOUSE = "[?1000h[?1006h";
 const DISABLE_MOUSE = "[?1006l[?1000l";
@@ -101,6 +107,51 @@ describe("mouseMode", () => {
 			written.length = 0;
 			enterMouseMode();
 			expect(written).toEqual([ENABLE_MOUSE]);
+		});
+	});
+
+	describe("isMouseModeEnabled", () => {
+		it("starts false and tracks enterMouseMode / exitMouseMode", () => {
+			setTTY(true, true);
+			expect(isMouseModeEnabled()).toBe(false);
+			enterMouseMode();
+			expect(isMouseModeEnabled()).toBe(true);
+			exitMouseMode();
+			expect(isMouseModeEnabled()).toBe(false);
+		});
+	});
+
+	describe("toggleMouseMode", () => {
+		it("flips from off to on and returns the new state", () => {
+			setTTY(true, true);
+			expect(toggleMouseMode()).toBe(true);
+			expect(isMouseModeEnabled()).toBe(true);
+			expect(written).toEqual([ENABLE_MOUSE]);
+		});
+
+		it("flips from on to off and returns the new state", () => {
+			setTTY(true, true);
+			enterMouseMode();
+			written.length = 0;
+			expect(toggleMouseMode()).toBe(false);
+			expect(isMouseModeEnabled()).toBe(false);
+			expect(written).toEqual([DISABLE_MOUSE]);
+		});
+
+		it("flips back and forth across consecutive toggles", () => {
+			setTTY(true, true);
+			toggleMouseMode(); // on
+			toggleMouseMode(); // off
+			toggleMouseMode(); // on
+			expect(isMouseModeEnabled()).toBe(true);
+			expect(written).toEqual([ENABLE_MOUSE, DISABLE_MOUSE, ENABLE_MOUSE]);
+		});
+
+		it("is a no-op when TTYs aren't attached", () => {
+			setTTY(false, true);
+			expect(toggleMouseMode()).toBe(false);
+			expect(isMouseModeEnabled()).toBe(false);
+			expect(written).toEqual([]);
 		});
 	});
 });

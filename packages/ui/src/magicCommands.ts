@@ -30,6 +30,11 @@ export const MAGIC_COMMANDS: readonly CommandSpec[] = Object.freeze([
 		description: "disconnect from the current peer without quitting",
 		usage: "/disconnect",
 	},
+	{
+		name: "mouse",
+		description: "toggle mouse tracking (turn off to drag-select text)",
+		usage: "/mouse",
+	},
 ]);
 
 export type ParsedCommand = {

@@ -170,3 +170,116 @@ describe("InputBox keyboard/mouse arbitration", () => {
 		expect(changes).toEqual(["draft"]);
 	});
 });
+
+describe("InputBox Tab completion", () => {
+	const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+	function mountWith(value: string): {
+		readonly changes: string[];
+		readonly stdin: { write: (data: string) => void };
+	} {
+		const changes: string[] = [];
+		const { stdin } = render(
+			<InputBox
+				value={value}
+				onChange={(next) => changes.push(next)}
+				onSubmit={() => {}}
+				onCommand={() => {}}
+				onUnknownCommand={() => {}}
+			/>,
+		);
+		return { changes, stdin };
+	}
+
+	// ink's key parser decodes a Tab keypress as the byte 0x09. We send
+	// it raw rather than as a control sequence so the test stays close to
+	// what the TTY actually delivers.
+	const TAB = "\t";
+
+	it("completes a partial command to the first match", async () => {
+		const { changes, stdin } = mountWith("/f");
+		await tick();
+
+		stdin.write(TAB);
+		await tick();
+
+		expect(changes).toEqual(["/file"]);
+	});
+
+	it("completes a longer partial unambiguously", async () => {
+		const { changes, stdin } = mountWith("/co");
+		await tick();
+
+		stdin.write(TAB);
+		await tick();
+
+		expect(changes).toEqual(["/connect"]);
+	});
+
+	it("appends a space when the name is already exact", async () => {
+		// `/file` then Tab should give `/file ` so the user can start
+		// typing the path. This mirrors how shells add a trailing space
+		// when a completion is unambiguous and the argument slot is empty.
+		const { changes, stdin } = mountWith("/file");
+		await tick();
+
+		stdin.write(TAB);
+		await tick();
+
+		expect(changes).toEqual(["/file "]);
+	});
+
+	it("does nothing when no command matches the partial", async () => {
+		const { changes, stdin } = mountWith("/zzz");
+		await tick();
+
+		stdin.write(TAB);
+		await tick();
+
+		expect(changes).toEqual([]);
+	});
+
+	it("does nothing for plain (non-slash) input", async () => {
+		const { changes, stdin } = mountWith("hello");
+		await tick();
+
+		stdin.write(TAB);
+		await tick();
+
+		expect(changes).toEqual([]);
+	});
+
+	it("does nothing once the user is already typing an argument", async () => {
+		// `/file /etc/hosts` then Tab — the user is past the command
+		// name, so Tab should be a no-op. The CommandSuggestion popup
+		// hides itself once a space appears, so we don't have any UI to
+		// dim; the test just asserts the value stays put.
+		const { changes, stdin } = mountWith("/file /etc/hosts");
+		await tick();
+
+		stdin.write(TAB);
+		await tick();
+
+		expect(changes).toEqual([]);
+	});
+
+	it("completes /disconnect from /d", async () => {
+		const { changes, stdin } = mountWith("/d");
+		await tick();
+
+		stdin.write(TAB);
+		await tick();
+
+		expect(changes).toEqual(["/disconnect"]);
+	});
+
+	it("completes /mouse from /m", async () => {
+		const { changes, stdin } = mountWith("/m");
+		await tick();
+
+		stdin.write(TAB);
+		await tick();
+
+		expect(changes).toEqual(["/mouse"]);
+	});
+});

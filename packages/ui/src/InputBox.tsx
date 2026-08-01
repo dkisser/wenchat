@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useRef, useState } from "react";
 import { HistoryStore } from "./historyStore";
-import { parseCommand, splitCommand } from "./magicCommands";
+import { matchCommands, parseCommand, splitCommand } from "./magicCommands";
 import { stripMouseReports } from "./mouseEvents";
 
 export type InputBoxProps = {
@@ -90,11 +90,35 @@ export function InputBox({
 			return;
 		}
 
+		if (key.tab) {
+			// Tab is reserved for command-name completion. Only the leading
+			// "/name" half is completed — once the user is typing an
+			// argument we leave them alone (the path/host they're typing
+			// has nothing to do with our command list).
+			if (!value.startsWith("/")) return;
+			const spaceIndex = value.indexOf(" ");
+			if (spaceIndex !== -1) return;
+			const partial = value.slice(1);
+			if (partial.length === 0) return;
+			const matches = matchCommands(partial);
+			if (matches.length === 0) return;
+			const candidate = matches[0];
+			if (!candidate) return;
+			if (partial === candidate.name) {
+				// Already at the exact name — pressing Tab again invites the
+				// argument with a single trailing space.
+				onChangeRef.current(`${value} `);
+				return;
+			}
+			onChangeRef.current(`/${candidate.name}`);
+			return;
+		}
+
 		if (key.return) {
 			if (value.length > 0) {
 				const parsed = parseCommand(value);
 				if (parsed) {
-					const known = ["exit", "file", "help", "connect", "disconnect"];
+					const known = ["exit", "file", "help", "connect", "disconnect", "mouse"];
 					if (known.includes(parsed.name)) {
 						onCommand(parsed.name, parsed.arg);
 					} else {

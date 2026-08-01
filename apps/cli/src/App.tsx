@@ -89,14 +89,15 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		peersRef.current = peers;
 	}, [peers]);
 
-	// Alt+M toggles mouse reporting at the terminal level. While tracking
+	// Ctrl+T toggles mouse reporting at the terminal level. While tracking
 	// is on the host terminal swallows drag-select, so users flip it off
-	// (and back on) to copy text out of the chat log. The InputBox's
-	// useInput only consumes non-meta keys, so this listener gets a clear
-	// shot at Alt/Meta combos without colliding with text entry.
+	// (and back on) to copy text out of the chat log. Ctrl+T was picked
+	// over the more discoverable Alt+M because macOS Terminal maps Alt
+	// to menu-bar navigation — every Alt combo is eaten before the TUI
+	// ever sees it. Ctrl+T is also exposed as a `/mouse` magic command
+	// for users who can't (or don't want to) remember the binding.
 	useInput((input, key) => {
-		if (!key.meta || !input) return;
-		if (input.toLowerCase() !== "m") return;
+		if (!key.ctrl || input !== "t") return;
 		toggleMouseMode();
 		setMouseEnabled(isMouseModeEnabled());
 	});
@@ -191,9 +192,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		// and ask the user to /disconnect first so the active chat isn't
 		// silently dropped on them.
 		if (status === "online" || status === "connecting") {
-			appendSystemMessage(
-				`Already connected. Run /disconnect first to switch peer.`,
-			);
+			appendSystemMessage("Already connected. Run /disconnect first to switch peer.");
 			return;
 		}
 		setSelectedPeer(peer);
@@ -269,7 +268,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 
 	const handleHelp = () => {
 		appendSystemMessage(
-			"Magic commands: /exit, /disconnect, /file <path>, /help, /connect <host:port>",
+			"Magic commands: /exit, /disconnect, /mouse, /file <path>, /help, /connect <host:port>",
 		);
 	};
 
@@ -329,9 +328,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 
 	const handleConnect = async (hostPort: string) => {
 		if (status === "online" || status === "connecting") {
-			appendSystemMessage(
-				`Already connected. Run /disconnect first to switch peer.`,
-			);
+			appendSystemMessage("Already connected. Run /disconnect first to switch peer.");
 			return;
 		}
 		const lastColon = hostPort.lastIndexOf(":");
@@ -363,6 +360,16 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		}
 	};
 
+	const handleMouse = () => {
+		// Toggle the terminal-level mouse reporting flag and mirror it
+		// into React state so the StatusBar indicator updates. We don't
+		// surface a system message — the bar's "Select mode" hint is the
+		// visible feedback and we don't want to spam the chat log on
+		// every flip.
+		toggleMouseMode();
+		setMouseEnabled(isMouseModeEnabled());
+	};
+
 	const handleCommand = (name: string, arg: string) => {
 		switch (name) {
 			case "exit":
@@ -370,6 +377,9 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 				return;
 			case "disconnect":
 				handleDisconnect();
+				return;
+			case "mouse":
+				handleMouse();
 				return;
 			case "file":
 				void handleFile(arg);
