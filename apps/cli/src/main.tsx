@@ -26,10 +26,18 @@ const mouseEnabled = !flags.has("--no-mouse");
 
 const displayName = positional[0] || `user-${Math.floor(Math.random() * 10000)}`;
 const signalingPort = Number(positional[1]) || 0;
-// arg[2] lets the user override (e.g. on a multi-homed host); default to the
-// detected LAN IPv4 so peers on the same network can actually reach us
-// instead of hitting 127.0.0.1.
-const signalingHost = positional[2] || getLanHost();
+// arg[2] is the bind host. Given explicitly (e.g. on a multi-homed host) it
+// wins outright and the app boots straight into the peer list, exactly as
+// before. Left out, an interactive run gets the startup picker — `undefined`
+// is the signal App reads — while a piped/redirected run keeps the old
+// silent default, since there is nobody there to answer a prompt.
+const explicitHost = positional[2];
+const isInteractive = process.stdout.isTTY === true && process.stdin.isTTY === true;
+const signalingHost: string | undefined = explicitHost
+	? explicitHost
+	: isInteractive
+		? undefined
+		: getLanHost();
 
 // Enter the alternate screen buffer BEFORE Ink mounts so the user sees a
 // clean fullscreen surface, not the moment of "scrollback → TUI" transition.

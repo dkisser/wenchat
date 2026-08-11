@@ -24,9 +24,26 @@ A recent regression reintroduced `exitOnCtrlC` and produced a frozen terminal on
 
 - `args[0]` — display name (defaults to `user-<random>`)
 - `args[1]` — signaling port (`0` means OS-assigned)
-- `args[2]` — signaling host override (defaults to LAN IPv4 from `getLanHost()`, **not** `127.0.0.1` — loopback cannot be reached by LAN peers)
+- `args[2]` — signaling host override. Given explicitly, it is used verbatim and the app boots straight into the peer list. Omitted, the resolution splits on TTY:
+  - **interactive** (stdout *and* stdin are TTYs) → `main.tsx` passes `signalingHost: undefined` and `App` opens on the `HostPicker` startup phase; the user arrows to an address and presses Enter
+  - **non-interactive** (piped/redirected) → falls back to `getLanHost()` silently, exactly as before, since nobody is there to answer a prompt
+
+Never default to `127.0.0.1` — loopback cannot be reached by LAN peers.
 
 This nickname is just an mDNS peer display name. It does **not** write `/etc/hostname` or `scutil`.
+
+## Bind address vs advertise address
+
+`PeerConnection.startListening(port, bindHost, advertiseHost = bindHost)` takes both. They are equal for a concrete address; they differ only for the `0.0.0.0` wildcard the picker offers. Binding the wildcard is fine, but publishing it is not — a peer that reads `"0.0.0.0"` out of our mDNS TXT record (or off our SDP offer) would dial its own loopback. `App` runs the bind address through `resolveAdvertiseHost()` (`packages/core/src/network.ts`) and feeds the result to both `discovery.start()` and the third `startListening` argument.
+
+## The startup picker phase is gated, and the gate is load-bearing
+
+`App` holds `bindHost: string | null`. The mount effect early-returns `undefined` while it is null, so **nothing binds a port or publishes over mDNS until the user picks**. The early return must stay `return undefined` (not a bare `return`) — `noImplicitReturns` rejects a bare one once the other path returns a cleanup.
+
+The picker branch must also stay *below* every hook call: leaving the phase is a re-render of the same component, and React requires a stable hook order.
+
+The picking-phase tree renders only `StatusBar` + `HostPicker` — deliberately no `InputBox`. That is what keeps InputBox's Up/Down history recall from fighting the picker for the same arrow keys, so no `isActive` gating is needed.
+
 
 ## macOS Bonjour "name changed" alert is expected
 
