@@ -122,14 +122,32 @@ describe("installTerminalSafetyNet", () => {
 	});
 
 	it("uninstall removes every handler", () => {
+		const events = [
+			"SIGINT",
+			"SIGTERM",
+			"beforeExit",
+			"uncaughtException",
+			"unhandledRejection",
+		] as const;
+		const before = Object.fromEntries(
+			events.map((event) => [event, process.listenerCount(event)]),
+		) as Record<(typeof events)[number], number>;
+
 		uninstall = installTerminalSafetyNet(releases);
+		const afterInstall = Object.fromEntries(
+			events.map((event) => [event, process.listenerCount(event)]),
+		) as Record<(typeof events)[number], number>;
+
 		uninstall();
 		uninstall = null;
-		const callsBefore = exitSpy.mock.calls.length;
+		const afterUninstall = Object.fromEntries(
+			events.map((event) => [event, process.listenerCount(event)]),
+		) as Record<(typeof events)[number], number>;
 
-		process.emit("SIGINT");
-
+		for (const event of events) {
+			expect(afterInstall[event]).toBe(before[event] + 1);
+			expect(afterUninstall[event]).toBe(before[event]);
+		}
 		expect(releaseOrder).toEqual([]);
-		expectDelta(callsBefore, 0);
 	});
 });

@@ -31,6 +31,32 @@ describe("PeerConnection", () => {
 		}
 	});
 
+	it("advertises the third argument instead of the bind address when they differ", async () => {
+		// Wildcard bind: we listen on every NIC but must tell the peer a
+		// concrete address, because "0.0.0.0" would resolve to the peer's own
+		// loopback. The advertised host is the one that reaches onIncoming —
+		// the bind address never leaves this process.
+		const alice = new PeerConnection();
+		const bob = new PeerConnection();
+		try {
+			await alice.startListening(0, "127.0.0.1", "10.9.9.9");
+			await bob.startListening(0);
+
+			const received: IncomingOfferInfo[] = [];
+			const unsub = bob.onIncoming((info) => received.push(info));
+
+			await alice.connect("127.0.0.1", bob.getSignalingPort());
+
+			expect(received.length).toBeGreaterThanOrEqual(1);
+			expect(received[0].signalingHost).toBe("10.9.9.9");
+
+			unsub();
+		} finally {
+			alice.close();
+			bob.close();
+		}
+	});
+
 	it("onIncoming unsubscribe stops further notifications", async () => {
 		const alice = new PeerConnection();
 		const bob = new PeerConnection();

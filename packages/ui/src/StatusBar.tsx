@@ -10,9 +10,21 @@ export type StatusBarProps = {
 	 * a hint reminding the user how to flip back to wheel-scroll mode.
 	 */
 	mouseEnabled?: boolean;
+	/**
+	 * Free-form note appended after the status word, styled like the mouse
+	 * hint. Used by the startup host picker, which has no peer to name yet
+	 * but still needs a line of instruction.
+	 */
+	hint?: string;
 };
 
-export function StatusBar({ status, peerName, peerEndpoint, mouseEnabled = true }: StatusBarProps) {
+export function StatusBar({
+	status,
+	peerName,
+	peerEndpoint,
+	mouseEnabled = true,
+	hint,
+}: StatusBarProps) {
 	const statusText = {
 		offline: "Offline",
 		connecting: "Connecting...",
@@ -31,6 +43,7 @@ export function StatusBar({ status, peerName, peerEndpoint, mouseEnabled = true 
 	return (
 		<Box paddingLeft={1}>
 			<Text color={color}>{statusText[status]}</Text>
+			{hint && <Text color="gray">{`  • ${hint}`}</Text>}
 			{!mouseEnabled && <Text color="gray">{"  • Select mode (Ctrl+T or /mouse to scroll)"}</Text>}
 		</Box>
 	);

@@ -1,17 +1,12 @@
-import { networkInterfaces } from "node:os";
-import { SignalingServer } from "@wenchat/core";
+import { SignalingServer, getLanHost } from "@wenchat/core";
 
 async function main() {
-	const iface = networkInterfaces();
-	let lanHost = "127.0.0.1";
-	for (const name of Object.keys(iface)) {
-		for (const i of iface[name] ?? []) {
-			if (i.family === "IPv4" && !i.internal) {
-				lanHost = i.address;
-				break;
-			}
-		}
-	}
+	// Use the same helper the CLI binds with, rather than a second copy of the
+	// selection logic. The copy that used to live here `break`-ed only out of
+	// the inner loop, so a later NIC could overwrite the choice — it picked the
+	// *last* interface where getLanHost picks the first, and the two disagreed
+	// on any multi-homed host.
+	const lanHost = getLanHost();
 	console.log(`[smoke] detected LAN host: ${lanHost}`);
 
 	const server = new SignalingServer();

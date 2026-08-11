@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
 import { basename } from "node:path";
-import { DiscoveryService, PeerConnection } from "@wenchat/core";
+import {
+	type BindCandidate,
+	DiscoveryService,
+	PeerConnection,
+	listBindCandidates,
+	resolveAdvertiseHost,
+} from "@wenchat/core";
 import {
 	type Message,
 	type PeerInfo,
@@ -10,10 +16,12 @@ import {
 	createFileStart,
 } from "@wenchat/protocol";
 import {
+	CHROME_ROWS,
 	ChatView,
 	CommandSuggestion,
 	DEFAULT_DOWNLOAD_DIR,
 	FileReceiver,
+	HostPicker,
 	InputBox,
 	PeerList,
 	StatusBar,
@@ -30,7 +38,13 @@ import { isMouseModeEnabled, toggleMouseMode } from "./mouseMode";
 export type AppProps = {
 	displayName: string;
 	signalingPort: number;
-	signalingHost: string;
+	/**
+	 * Bind address. When omitted the app opens on the startup host picker
+	 * instead of going straight to the peer list — `main.tsx` leaves it
+	 * undefined only for an interactive run that got no explicit host
+	 * argument.
+	 */
+	signalingHost?: string;
 	/**
 	 * Test-only: seed the chat log with an initial message so render
 	 * branches that depend on `messages.length` can be asserted in
@@ -58,6 +72,13 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	// matches reality instead of always rendering "Select mode".
 	const [mouseEnabled, setMouseEnabled] = useState(() => isMouseModeEnabled());
 	const [localId] = useState(() => randomUUID());
+
+	// null until the user picks an address in the startup HostPicker. A
+	// caller-supplied `signalingHost` seeds it directly, which skips the
+	// picker entirely and preserves the explicit
+	// `cli <name> <port> <host>` invocation.
+	const [bindHost, setBindHost] = useState<string | null>(signalingHost ?? null);
+	const [candidates] = useState(() => listBindCandidates());
 
 	const [discovery] = useState(() => new DiscoveryService());
 	const [peerConnection] = useState(() => new PeerConnection());
@@ -103,9 +124,20 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	});
 
 	useEffect(() => {
+		// Nothing is bound or advertised until the user picks an address.
+		// Returning `undefined` (not a bare `return`) keeps every code path
+		// returning a value, which `noImplicitReturns` requires once the
+		// other path returns a cleanup.
+		if (bindHost === null) return undefined;
+
+		// Binding 0.0.0.0 is legitimate, but publishing it is not: a peer
+		// reading "0.0.0.0" out of our mDNS TXT record would dial its own
+		// loopback. Advertise a concrete address in that case.
+		const advertiseHost = resolveAdvertiseHost(bindHost);
+
 		discovery.onPeersUpdated(setPeers);
-		discovery.start(displayName, signalingPort, signalingHost).catch(() => {});
-		peerConnection.startListening(signalingPort, signalingHost).catch(() => {});
+		discovery.start(displayName, signalingPort, advertiseHost).catch(() => {});
+		peerConnection.startListening(signalingPort, bindHost, advertiseHost).catch(() => {});
 		const unsubscribeIncoming = peerConnection.onIncoming(({ signalingHost, signalingPort }) => {
 			// Receiver side: someone is dialing us. Resolve the
 			// signaling endpoint to a PeerInfo (either a discovered
@@ -183,7 +215,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			discovery.stop().catch(() => {});
 			peerConnection.close();
 		};
-	}, [discovery, displayName, peerConnection, signalingPort, signalingHost]);
+	}, [discovery, displayName, peerConnection, signalingPort, bindHost]);
 
 	const handleSelectPeer = async (peer: PeerInfo) => {
 		// Re-selecting a peer (or any other peer) while already connected
@@ -415,6 +447,35 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		// PeerList path still gets inactive scroll input.
 		isActive: status !== "offline" || messages.length > 0,
 	});
+
+	const handleSelectBindHost = (candidate: BindCandidate) => {
+		setBindHost(candidate.address);
+	};
+
+	// Startup phase: no address chosen yet, so nothing is listening and there
+	// is nothing to type at. This branch must stay below every hook call —
+	// React requires an unconditional hook order across renders, and the
+	// transition out of this phase is a re-render of the same component.
+	//
+	// Rendering only the StatusBar and the picker also keeps InputBox
+	// unmounted, which is what stops its Up/Down history recall from fighting
+	// the picker for the same arrow keys. `useChatScroll` is already inactive
+	// here (offline with an empty log), so it doesn't claim them either.
+	if (bindHost === null) {
+		return (
+			<Box flexDirection="column" height={layout.frameHeight}>
+				<Box flexShrink={0}>
+					<StatusBar status="offline" mouseEnabled={mouseEnabled} hint="Pick a bind address" />
+				</Box>
+				<HostPicker
+					candidates={candidates}
+					signalingPort={signalingPort}
+					onSelect={handleSelectBindHost}
+					height={layout.frameHeight - CHROME_ROWS.statusBar}
+				/>
+			</Box>
+		);
+	}
 
 	return (
 		// A numeric height is the only thing that pins the InputBox to the last

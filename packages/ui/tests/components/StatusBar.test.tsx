@@ -26,6 +26,15 @@ describe("StatusBar", () => {
 		expect(frame).not.toMatch(/\d+\.\d+\.\d+\.\d+:\d+/);
 	});
 
+	it("appends a hint after the status word when one is given", () => {
+		const { lastFrame } = render(<StatusBar status="offline" hint="Pick a bind address" />);
+		const frame = lastFrame() ?? "";
+		expect(frame).toContain("Offline");
+		expect(frame).toContain("Pick a bind address");
+		// Still one row — the hint shares the status line rather than adding one.
+		expect(frame.split("\n").length).toBe(1);
+	});
+
 	it("renders without a border so it costs only one row", () => {
 		// The status bar used to be a bordered Box, which consumed three rows
 		// (border + text + border) and visually sandwiched the chat top

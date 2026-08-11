@@ -57,8 +57,23 @@ export class PeerConnection {
 		this.signaling = new SignalingServer();
 	}
 
-	async startListening(signalingPort: number, signalingHost = "127.0.0.1"): Promise<void> {
-		this.localSignalingHost = signalingHost;
+	/**
+	 * Start the signaling server.
+	 *
+	 * `signalingHost` is the *bind* address; `advertiseHost` is what we tell
+	 * peers to dial back on. They are the same for a concrete address, and
+	 * differ only when binding the `0.0.0.0` wildcard — a peer handed
+	 * `"0.0.0.0"` would resolve it to its own loopback, so callers pass the
+	 * LAN IPv4 (see `resolveAdvertiseHost`) as the third argument. Defaulting
+	 * `advertiseHost` to `signalingHost` keeps every existing two-argument
+	 * call site behaving exactly as before.
+	 */
+	async startListening(
+		signalingPort: number,
+		signalingHost = "127.0.0.1",
+		advertiseHost = signalingHost,
+	): Promise<void> {
+		this.localSignalingHost = advertiseHost;
 		await this.signaling.start(signalingPort, signalingHost);
 
 		this.signaling.onOffer(async (offer) => {
