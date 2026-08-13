@@ -1,5 +1,12 @@
 node_modules/
 dist/
+# @yao-pkg/packer output (single-binary releases)
+dist-release/
+# Node SEA blob artifacts (in case we ever drop to raw SEA)
+*.blob
+# Top-level accidental packer output (safety net; packer normally writes to dist-release/)
+/wenchat
+/wenchat.exe
 *.log
 .DS_Store
 .env

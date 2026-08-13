@@ -22,7 +22,8 @@
 		"test": "bun test",
 		"lint": "biome check .",
 		"format": "biome format --write .",
-		"cli": "tsx apps/cli/src/main.tsx"
+		"cli": "tsx apps/cli/src/main.tsx",
+		"package:cli": "bun scripts/package-cli.ts"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^1.8.3",
