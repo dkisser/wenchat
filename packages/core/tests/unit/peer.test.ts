@@ -1,34 +1,42 @@
 import { describe, expect, it } from "bun:test";
+import dgram from "node:dgram";
 import { type IncomingOfferInfo, PeerConnection } from "../../src/peer";
 
 // Linux kernel is stricter than macOS about UDP port-unreachable: a STUN
 // packet landing on a peer socket that has already closed turns into an
-// 'error' event on werift's dgram socket, which bun:test's
-// uncaughtException listener converts into a test failure. macOS silently
-// drops the ICMP.
+// 'error' event on werift's dgram socket, which bun:test converts into a
+// test failure via its uncaughtException handler. macOS silently drops
+// the ICMP, so this never surfaces there.
 //
-// We can't reach werift's internal sockets, but we CAN install a
-// process-level handler that runs before bun:test's (using
-// `prependListener`) and silently swallows the port-unreachable family.
-// Any other error re-throws so unrelated failures still surface.
+// We can't reach into werift to add an 'error' listener on its internal
+// sockets, but the dgram module exposes the Socket class as a normal
+// property. We monkey-patch the prototype's emit so the
+// port-unreachable family never bubbles up. The patch is reverted at the
+// end of each affected test so unrelated tests stay untouched.
+const SUPPRESS_MARKER = Symbol.for("wenchat.peer-test.udp-suppressed");
+
 const suppressUdpRefused = (): (() => void) => {
-	const handler = (err: unknown): void => {
-		const code = (err as { code?: string } | null)?.code;
-		const msg = err instanceof Error ? err.message : String(err);
-		if (
-			code === "ECONNREFUSED" ||
-			code === "EHOSTUNREACH" ||
-			msg.includes("ECONNREFUSED") ||
-			msg.includes("EHOSTUNREACH")
-		) {
-			return;
-		}
-		// Let any other error propagate.
-		throw err;
+	if ((dgram.Socket.prototype as unknown as { [k: symbol]: boolean })[SUPPRESS_MARKER]) {
+		return () => {}; // already installed; nothing to restore
+	}
+	const proto = dgram.Socket.prototype as unknown as {
+		emit: (event: string, ...args: unknown[]) => boolean;
 	};
-	process.prependListener("uncaughtException", handler);
+	const originalEmit = proto.emit;
+	proto.emit = function patchedEmit(event: string, ...args: unknown[]): boolean {
+		if (event === "error") {
+			const err = args[0] as { code?: string } | null | undefined;
+			const code = err?.code;
+			if (code === "ECONNREFUSED" || code === "EHOSTUNREACH") {
+				return false; // pretend the listener was missing → silent
+			}
+		}
+		return originalEmit.call(this, event, ...args);
+	};
+	(dgram.Socket.prototype as unknown as { [k: symbol]: boolean })[SUPPRESS_MARKER] = true;
 	return () => {
-		process.off("uncaughtException", handler);
+		proto.emit = originalEmit;
+		(dgram.Socket.prototype as unknown as { [k: symbol]: boolean })[SUPPRESS_MARKER] = false;
 	};
 };
 
