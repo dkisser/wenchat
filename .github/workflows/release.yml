@@ -38,11 +38,18 @@ jobs:
         # runtime plus the yoga native binding. --options.define injects
         # the version tag so `wenchat version` can self-report.
         run: bun run package:cli --target ${{ matrix.target }} --tag ${{ github.ref_name }}
+      - name: Stage binary with target-qualified filename
+        # `actions/upload-artifact` preserves the file basename as the
+        # release asset name. install.sh and apps/cli/src/updater.ts
+        # both build URLs around `wenchat-<tag>-<target><ext>` (see
+        # `assetNameFor()` in updater.ts), so we rename before upload
+        # instead of letting the basename leak through.
+        run: mv "dist-release/wenchat${{ matrix.suffix }}" "dist-release/wenchat-${{ github.ref_name }}-${{ matrix.target }}${{ matrix.suffix }}"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: wenchat-${{ github.ref_name }}-${{ matrix.target }}${{ matrix.suffix }}
-          path: dist-release/wenchat${{ matrix.suffix }}
+          path: dist-release/wenchat-${{ github.ref_name }}-${{ matrix.target }}${{ matrix.suffix }}
           if-no-files-found: error
 
   upload-install-scripts:
@@ -70,7 +77,9 @@ jobs:
       - name: Generate SHA256SUMS
         run: |
           cd artifacts
-          find . -type f \( -name 'wenchat' -o -name 'wenchat.exe' \) -exec sha256sum {} \; > SHA256SUMS
+          # Match the target-qualified filenames produced by the build job's
+          # rename step above. Do NOT include install.sh or the lockfile.
+          find . -type f -name 'wenchat-v*' -exec sha256sum {} \; > SHA256SUMS
           cat SHA256SUMS
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
