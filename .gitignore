@@ -10,6 +10,7 @@ dist-release/
 # Bun lockfile — kept on disk for reproducible `bun install` but intentionally
 # untracked. Contributors regenerate locally; CI installs without --frozen-lockfile.
 bun.lockb
+bun.lock
 # Internal design docs / plans / specs. Lives in-repo for the maintainer's
 # reference but shouldn't be in the published history.
 docs/superpowers/
