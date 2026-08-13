@@ -11,7 +11,9 @@
 	"dependencies": {
 		"@wenchat/core": "workspace:*",
 		"@wenchat/protocol": "workspace:*",
+		"cli-highlight": "^2.1.11",
 		"ink": "^5.0.0",
+		"marked": "^16.0.0",
 		"react": "^18.3.0",
 		"wrap-ansi": "9.0.2"
 	},

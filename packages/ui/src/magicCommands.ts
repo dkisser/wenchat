@@ -35,6 +35,11 @@ export const MAGIC_COMMANDS: readonly CommandSpec[] = Object.freeze([
 		description: "toggle mouse tracking (turn off to drag-select text)",
 		usage: "/mouse",
 	},
+	{
+		name: "copy",
+		description: "copy the most recent message to the clipboard (/copy <n> for n-th from end)",
+		usage: "/copy [n]",
+	},
 ]);
 
 export type ParsedCommand = {

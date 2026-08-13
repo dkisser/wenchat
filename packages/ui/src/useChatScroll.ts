@@ -34,6 +34,12 @@ export type UseChatScrollResult = {
 	readonly unread: number;
 	readonly atBottom: boolean;
 	readonly totalLines: number;
+	/**
+	 * Parallel to the input `messages` array. `messageStartIndices[i]` is the
+	 * global line index where `messages[i]` begins, so a terminal-row click
+	 * can be mapped back to the owning message via `findMessageAtLine`.
+	 */
+	readonly messageStartIndices: readonly number[];
 };
 
 /**
@@ -51,10 +57,11 @@ export function useChatScroll({
 	isActive = true,
 	wheelLines = DEFAULT_WHEEL_LINES,
 }: UseChatScrollArgs): UseChatScrollResult {
-	const lines = useMemo(
+	const display = useMemo(
 		() => toDisplayLines(messages, localId, contentWidth),
 		[messages, localId, contentWidth],
 	);
+	const { lines, messageStartIndices } = display;
 
 	const metrics: ScrollMetrics = { totalLines: lines.length, viewportHeight };
 	// Event handlers registered once must still see fresh metrics, so mirror
@@ -118,5 +125,6 @@ export function useChatScroll({
 		unread: state.unread,
 		atBottom: isAtBottom(state, metrics),
 		totalLines: lines.length,
+		messageStartIndices,
 	};
 }

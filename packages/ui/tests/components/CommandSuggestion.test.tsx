@@ -46,7 +46,8 @@ describe("CommandSuggestion", () => {
 		expect(frame).toContain("send");
 		expect(frame).toContain("manual");
 		expect(frame).toContain("disconnect");
-		expect(frame).toContain("toggle");
+		// /copy is the newest command — its description must surface.
+		expect(frame).toContain("clipboard");
 	});
 });
 

@@ -62,4 +62,32 @@ describe("StatusBar", () => {
 		expect(frame.startsWith(" ")).toBe(true);
 		expect(frame).toContain("Offline");
 	});
+
+	it("renders a toast on the right edge without growing the line", () => {
+		const { lastFrame } = render(
+			<Box flexDirection="column" width={80}>
+				<StatusBar status="online" toast={{ text: "Copied" }} />
+			</Box>,
+		);
+		const frame = lastFrame() ?? "";
+		expect(frame).toContain("Copied");
+		// Toast is in-row, not a second line.
+		expect(frame.split("\n").length).toBe(1);
+	});
+
+	it("does not render the toast slot when toast is null/undefined", () => {
+		const { lastFrame } = render(<StatusBar status="online" />);
+		expect(lastFrame()).not.toContain("Copied");
+	});
+
+	it("styles error-tone toasts in red", () => {
+		const { lastFrame } = render(
+			<StatusBar status="online" toast={{ text: "Copy failed", tone: "error" }} />,
+		);
+		const frame = lastFrame() ?? "";
+		expect(frame).toContain("Copy failed");
+		// ANSI red is "\x1b[31m"; gray would be "\x1b[90m" — make sure we
+		// emitted the red escape specifically.
+		expect(frame).toContain("\x1b[31m");
+	});
 });

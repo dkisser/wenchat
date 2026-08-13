@@ -25,14 +25,18 @@ import {
 	InputBox,
 	PeerList,
 	StatusBar,
+	type StatusBarToast,
 	computeChatLayout,
+	findMessageAtLine,
 	isCommandSuggestionVisible,
 	saveCompletedTransfer,
 	useChatScroll,
+	useDoubleClick,
 	useTerminalSize,
 } from "@wenchat/ui";
 import { Box, useApp, useInput } from "ink";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { copyToClipboard } from "./clipboard";
 import { isMouseModeEnabled, toggleMouseMode } from "./mouseMode";
 
 export type AppProps = {
@@ -259,7 +263,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		setMessages((prev) => appendCapped(prev, message));
 	};
 
-	const appendSystemMessage = (text: string) => {
+	const appendSystemMessage = useCallback((text: string) => {
 		const message: TextMessage = {
 			type: "text",
 			id: `system-${randomUUID()}`,
@@ -267,7 +271,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			payload: { text },
 		};
 		setMessages((prev) => appendCapped(prev, message));
-	};
+	}, []);
 
 	const handleFile = async (path: string) => {
 		try {
@@ -300,7 +304,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 
 	const handleHelp = () => {
 		appendSystemMessage(
-			"Magic commands: /exit, /disconnect, /mouse, /file <path>, /help, /connect <host:port>",
+			"Magic commands: /exit, /disconnect, /mouse, /file <path>, /help, /connect <host:port>, /copy [n]",
 		);
 	};
 
@@ -422,7 +426,44 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			case "connect":
 				void handleConnect(arg);
 				return;
+			case "copy":
+				handleCopy(arg);
+				return;
 		}
+	};
+
+	// Walk messages backwards, picking the n-th text message (1-based).
+	// File-start / file-chunk / file-end / ping / pong messages do not
+	// increment the counter — only the chat surface does.
+	const handleCopy = (arg: string) => {
+		const trimmed = arg.trim();
+		let n = 1;
+		if (trimmed.length > 0) {
+			const parsed = Number.parseInt(trimmed, 10);
+			if (!Number.isFinite(parsed) || parsed < 1) {
+				appendSystemMessage(`Invalid /copy argument: expected positive integer, got "${arg}"`);
+				return;
+			}
+			n = parsed;
+		}
+		let found: TextMessage | null = null;
+		let seen = 0;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (!message || message.type !== "text") continue;
+			seen++;
+			if (seen === n) {
+				found = message;
+				break;
+			}
+		}
+		if (!found) {
+			appendSystemMessage(
+				`No message at position ${n} (only ${seen} text message${seen === 1 ? "" : "s"} in log)`,
+			);
+			return;
+		}
+		copyAndReport(found.payload.text);
 	};
 
 	const handleUnknownCommand = (name: string, _arg: string) => {
@@ -448,6 +489,64 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		isActive: status !== "offline" || messages.length > 0,
 	});
 
+	// Copy a message's raw text to the system clipboard and surface the
+	// outcome as a system entry. Fire-and-forget: copyToClipboard is
+	// async (spawn round-trip), and awaiting inside a double-click handler
+	// would block the next stdin chunk.
+	// Transient toast state — a short-lived notice shown on the right edge of
+	// the StatusBar. Copy / paste feedback and other one-shot events land here
+	// rather than the message log, so the chat history stays clean.
+	const [toast, setToast] = useState<StatusBarToast | null>(null);
+	const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const showToast = useCallback((text: string, tone: "info" | "error" = "info") => {
+		if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+		setToast({ text, tone });
+		toastTimerRef.current = setTimeout(() => setToast(null), 2000);
+	}, []);
+	useEffect(
+		() => () => {
+			if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+		},
+		[],
+	);
+
+	const copyAndReport = useCallback(
+		(text: string) => {
+			void copyToClipboard(text).then((result) => {
+				if (result.ok) {
+					const preview = text.length > 40 ? `${text.slice(0, 37)}...` : text;
+					showToast(`Copied: ${preview.replace(/\n/g, " ")}`);
+				} else {
+					showToast(`Copy failed: ${result.reason}`, "error");
+				}
+			});
+		},
+		[showToast],
+	);
+
+	// Double-clicking a chat row copies that message's original text.
+	// SGR row is 1-based; the first content row inside the bordered chat
+	// is at terminal row `CHROME_ROWS.statusBar + CHROME_ROWS.chatBorder`
+	// (status line + chat top border). Converting to a global display line
+	// index: subtract that header, then add firstLineIndex.
+	const chatTopRow = CHROME_ROWS.statusBar + CHROME_ROWS.chatBorder;
+	useDoubleClick(
+		useCallback(
+			(_col, row) => {
+				const localIdx = row - chatTopRow;
+				if (localIdx < 1) return; // clicked above the first content row
+				const globalIdx = scroll.firstLineIndex + (localIdx - 1);
+				const messageIdx = findMessageAtLine(scroll.messageStartIndices, globalIdx);
+				if (messageIdx === -1) return; // gap (e.g. unread indicator row)
+				const message = messages[messageIdx];
+				if (!message || message.type !== "text") return;
+				copyAndReport(message.payload.text);
+			},
+			[scroll.firstLineIndex, scroll.messageStartIndices, messages, chatTopRow, copyAndReport],
+		),
+		{ isActive: status !== "offline" || messages.length > 0 },
+	);
+
 	const handleSelectBindHost = (candidate: BindCandidate) => {
 		setBindHost(candidate.address);
 	};
@@ -465,7 +564,12 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		return (
 			<Box flexDirection="column" height={layout.frameHeight}>
 				<Box flexShrink={0}>
-					<StatusBar status="offline" mouseEnabled={mouseEnabled} hint="Pick a bind address" />
+					<StatusBar
+						status="offline"
+						mouseEnabled={mouseEnabled}
+						hint="Pick a bind address"
+						toast={toast}
+					/>
 				</Box>
 				<HostPicker
 					candidates={candidates}
@@ -495,6 +599,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 						selectedPeer ? `${selectedPeer.signalingHost}:${selectedPeer.signalingPort}` : undefined
 					}
 					mouseEnabled={mouseEnabled}
+					toast={toast}
 				/>
 			</Box>
 			{status === "offline" && messages.length === 0 ? (

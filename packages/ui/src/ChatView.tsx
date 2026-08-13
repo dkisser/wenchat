@@ -47,8 +47,13 @@ export function ChatView({ lines, firstLineIndex = 0, unread = 0, height }: Chat
 				// globally unique log index (`firstLineIndex + index`), so the
 				// key is stable across re-renders and no React reconciliation
 				// confusion is possible.
+				//
+				// `wrap="wrap"` (not `"truncate-end"`) so Ink soft-wraps long
+				// content with the same wrap-ansi options `{trim:false,
+				// hard:true}` that `wrapToWidth` uses upstream — keeping the
+				// "flat line count = rendered row count" invariant intact.
 				// biome-ignore lint/suspicious/noArrayIndexKey: keyed by global log index, not per-render array index
-				<Text key={firstLineIndex + index} wrap="truncate-end">
+				<Text key={firstLineIndex + index} wrap="wrap">
 					{line.length > 0 ? line : " "}
 				</Text>
 			))}
