@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.sh | bash
 #
 # Env overrides:
-#   WENCHAT_VERSION=v0.1.0      Pin a specific release (skip "latest" lookup)
+#   WENCHAT_VERSION=v0.1.1      Pin a specific release (skip "latest" lookup)
 #   WENCHAT_INSTALL_DIR=/path   Override install location (default: $HOME/.local/bin)
 set -euo pipefail
 
@@ -38,7 +38,7 @@ else
 	if ! VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
 		| grep '"tag_name"' | head -1 | cut -d'"' -f4); then
 		echo "Error: failed to fetch latest release from GitHub API." >&2
-		echo "Set WENCHAT_VERSION=v0.1.0 to install a specific version." >&2
+		echo "Set WENCHAT_VERSION=v0.1.1 to install a specific version." >&2
 		exit 1
 	fi
 fi
