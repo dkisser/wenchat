@@ -1,2 +1,7 @@
 [install]
 exact = true
+# Pin to the official registry so package lookups are deterministic across CI
+# and local dev. A system-level .npmrc may point at a mirror (e.g. npmmirror)
+# that lags behind for less-common packages like @yao-pkg/pkg; without
+# this override `bun run package:cli` 404s on the mirror during release builds.
+registry = "https://registry.npmjs.org/"
