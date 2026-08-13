@@ -1,5 +1,18 @@
 {
 	"name": "@wenchat/core",
+	"description": "WenChat core — WebRTC peer connection, mDNS discovery, HTTP signaling, and heartbeat",
+	"keywords": [
+		"wenchat",
+		"webrtc",
+		"werift",
+		"mdns",
+		"bonjour",
+		"signaling",
+		"p2p",
+		"lan",
+		"peer-to-peer"
+	],
+	"license": "MIT",
 	"version": "0.1.0",
 	"type": "module",
 	"main": "./src/index.ts",
@@ -17,5 +30,13 @@
 	"devDependencies": {
 		"@types/node": "^20.0.0",
 		"typescript": "^5.5.0"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/dkisser/wenchat.git"
+	},
+	"homepage": "https://github.com/dkisser/wenchat#readme",
+	"bugs": {
+		"url": "https://github.com/dkisser/wenchat/issues"
 	}
 }

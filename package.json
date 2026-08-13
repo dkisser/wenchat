@@ -1,5 +1,19 @@
 {
 	"name": "wenchat",
+	"description": "WenChat — LAN-only P2P terminal chat over WebRTC with mDNS auto-discovery",
+	"keywords": [
+		"wenchat",
+		"webrtc",
+		"p2p",
+		"lan",
+		"chat",
+		"terminal",
+		"tui",
+		"mdns",
+		"bonjour",
+		"monorepo"
+	],
+	"license": "MIT",
 	"private": true,
 	"version": "0.1.0",
 	"workspaces": ["apps/*", "packages/*"],
@@ -19,5 +33,13 @@
 	},
 	"engines": {
 		"node": ">=20.0.0"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/dkisser/wenchat.git"
+	},
+	"homepage": "https://github.com/dkisser/wenchat#readme",
+	"bugs": {
+		"url": "https://github.com/dkisser/wenchat/issues"
 	}
 }

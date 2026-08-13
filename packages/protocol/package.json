@@ -1,5 +1,8 @@
 {
 	"name": "@wenchat/protocol",
+	"description": "WenChat protocol — zero-dependency message types and chunk serialization for chat and file transfer",
+	"keywords": ["wenchat", "protocol", "message", "serialization", "file-transfer"],
+	"license": "MIT",
 	"version": "0.1.0",
 	"type": "module",
 	"main": "./src/index.ts",
@@ -13,5 +16,13 @@
 	},
 	"devDependencies": {
 		"typescript": "^5.5.0"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/dkisser/wenchat.git"
+	},
+	"homepage": "https://github.com/dkisser/wenchat#readme",
+	"bugs": {
+		"url": "https://github.com/dkisser/wenchat/issues"
 	}
 }

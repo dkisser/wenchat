@@ -1,7 +1,28 @@
 {
 	"name": "@wenchat/cli",
+	"description": "WenChat CLI — Ink (React) TUI for LAN P2P chat, file transfer, and Markdown rendering",
+	"keywords": [
+		"wenchat",
+		"cli",
+		"tui",
+		"ink",
+		"react",
+		"chat",
+		"terminal",
+		"webrtc",
+		"p2p",
+		"lan",
+		"mdns",
+		"bonjour",
+		"markdown",
+		"file-transfer"
+	],
+	"license": "MIT",
 	"version": "0.1.0",
 	"type": "module",
+	"bin": {
+		"wenchat": "./dist/main.js"
+	},
 	"scripts": {
 		"dev": "node --loader ts-node/esm src/main.tsx",
 		"build": "tsc -p tsconfig.json",
@@ -21,5 +42,13 @@
 		"ts-node": "^10.9.0",
 		"tsx": "^4.19.0",
 		"typescript": "^5.5.0"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/dkisser/wenchat.git"
+	},
+	"homepage": "https://github.com/dkisser/wenchat#readme",
+	"bugs": {
+		"url": "https://github.com/dkisser/wenchat/issues"
 	}
 }
