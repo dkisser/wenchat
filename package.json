@@ -15,8 +15,11 @@
 	],
 	"license": "MIT",
 	"private": true,
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"workspaces": ["apps/*", "packages/*"],
+	"overrides": {
+		"string-width": "4.2.3"
+	},
 	"scripts": {
 		"build": "bun run --filter '*' build",
 		"test": "bun test",
