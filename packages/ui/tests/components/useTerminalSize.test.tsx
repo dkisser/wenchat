@@ -47,9 +47,13 @@ describe("useTerminalSize", () => {
 	it("removes its resize listener on unmount", async () => {
 		const { stdout, unmount } = render(<Probe />);
 		await tick();
-		// ink registers a resize listener of its own, so ours is the +1.
+		// On macOS ink-testing-library's mock stdout also subscribes to its
+		// own 'resize' event, so we see >= 2. On Linux + GitHub Actions the
+		// mock stream doesn't, so the only listener present is ours. The
+		// invariant we actually want to assert is "our hook added a listener
+		// and then removed it" — that's >= 1 before unmount, === 0 after.
 		const mounted = stdout.listenerCount("resize");
-		expect(mounted).toBeGreaterThanOrEqual(2);
+		expect(mounted).toBeGreaterThanOrEqual(1);
 
 		unmount();
 		await tick();

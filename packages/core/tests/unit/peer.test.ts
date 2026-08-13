@@ -1,6 +1,25 @@
 import { describe, expect, it } from "bun:test";
 import { type IncomingOfferInfo, PeerConnection } from "../../src/peer";
 
+// Linux kernel is stricter than macOS about UDP port-unreachable: a STUN
+// packet landing on a peer socket that has already closed turns into an
+// 'error' event on werift's dgram socket, which surfaces as an unhandled
+// exception. macOS silently drops the ICMP. We install a process-level
+// filter so the regression assertion (which is about state-change events,
+// not transport health) stays focused on what it's testing.
+const suppressUdpRefused = (): (() => void) => {
+	const handler = (err: unknown): void => {
+		const code = (err as { code?: string } | null)?.code;
+		if (code === "ECONNREFUSED" || code === "EHOSTUNREACH") return;
+		// Re-throw anything else so unrelated failures still surface.
+		throw err;
+	};
+	process.on("uncaughtException", handler);
+	return () => {
+		process.off("uncaughtException", handler);
+	};
+};
+
 describe("PeerConnection", () => {
 	it("creates a peer connection", () => {
 		const peer = new PeerConnection();
@@ -93,6 +112,7 @@ describe("PeerConnection", () => {
 			// "disconnected" to the app. After disconnect, the local app
 			// should NOT observe a terminal state — that's what the
 			// `/disconnect` magic command relies on for its own message.
+			const restore = suppressUdpRefused();
 			const alice = new PeerConnection();
 			const bob = new PeerConnection();
 			try {
@@ -119,6 +139,7 @@ describe("PeerConnection", () => {
 			} finally {
 				alice.close();
 				bob.close();
+				restore();
 			}
 		});
 

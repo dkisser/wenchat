@@ -3,6 +3,13 @@ import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { StatusBar } from "../../src/StatusBar";
 
+// Force chalk/ink to emit ANSI escape codes regardless of the runner's TTY
+// detection. On GitHub Actions `process.stdout.isTTY` is false (and `CI=true`
+// is set), so ink's color detection would otherwise strip the `\x1b[31m`
+// red escape this test depends on. Setting FORCE_COLOR=1 is the upstream
+// convention; chalk 5+ reads it before any other signal.
+process.env.FORCE_COLOR = "1";
+
 describe("StatusBar", () => {
 	it("renders online status with peer name", () => {
 		const { lastFrame } = render(<StatusBar status="online" peerName="bob" />);
