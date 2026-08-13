@@ -1,112 +1,114 @@
 name: Release
 
+# YAML indentation uses 2 spaces, not tabs. js-yaml (which backs GitHub
+# Actions' parser) rejects tab characters at the start of a line; the
+# tabs that Biome enforces for JS/TS do not apply to YAML files.
 on:
-	push:
-		tags: ["v*"]
+  push:
+    tags: ["v*"]
 
 # Write access to publish the GitHub Release and upload assets.
 permissions:
-	contents: write
+  contents: write
 
 jobs:
-	build:
-		name: Build ${{ matrix.target }}
-		strategy:
-			fail-fast: false
-			matrix:
-				include:
-					- { target: linux-x64, os: ubuntu-latest, suffix: "" }
-					- { target: darwin-arm64, os: macos-14, suffix: "" }
-					- { target: windows-x64, os: windows-latest, suffix: ".exe" }
-		runs-on: ${{ matrix.os }}
-		steps:
-			- uses: actions/checkout@v4
-			- name: Setup Bun
-				uses: oven-sh/setup-bun@v2
-				with:
-					bun-version: 1.1.34
-			- name: Install (frozen lockfile)
-				run: bun install --frozen-lockfile
-			- name: Type-check (tsc)
-				run: bun run build
-			- name: Bundle single-binary
-				# @yao-pkg/packer reads apps/cli/src/main.tsx as the entry, follows
-				# workspace:* symlinks, bundles all TS + JS, and embeds the Node
-				# runtime plus the yoga native binding. --options.define injects
-				# the version tag so `wenchat version` can self-report.
-				run: bun run package:cli --target ${{ matrix.target }} --tag ${{ github.ref_name }}
-			- name: Upload artifact
-				uses: actions/upload-artifact@v4
-				with:
-					name: wenchat-${{ github.ref_name }}-${{ matrix.target }}${{ matrix.suffix }}
-					path: dist-release/wenchat${{ matrix.suffix }}
-					if-no-files-found: error
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, os: ubuntu-latest, suffix: "" }
+          - { target: darwin-arm64, os: macos-14, suffix: "" }
+          - { target: windows-x64, os: windows-latest, suffix: ".exe" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.34
+      - name: Install (frozen lockfile)
+        run: bun install --frozen-lockfile
+      - name: Type-check (tsc)
+        run: bun run build
+      - name: Bundle single-binary
+        # @yao-pkg/packer reads apps/cli/src/main.tsx as the entry, follows
+        # workspace:* symlinks, bundles all TS + JS, and embeds the Node
+        # runtime plus the yoga native binding. --options.define injects
+        # the version tag so `wenchat version` can self-report.
+        run: bun run package:cli --target ${{ matrix.target }} --tag ${{ github.ref_name }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wenchat-${{ github.ref_name }}-${{ matrix.target }}${{ matrix.suffix }}
+          path: dist-release/wenchat${{ matrix.suffix }}
+          if-no-files-found: error
 
-	upload-install-scripts:
-		name: Upload install scripts
-		# These go on every release regardless of build outcome so a user can
-		# always curl the script even if the binaries for their platform failed.
-		needs: []
-		runs-on: ubuntu-latest
-		steps:
-			- uses: actions/checkout@v4
-			- name: Upload install scripts
-				uses: actions/upload-artifact@v4
-				with:
-					name: install-scripts
-					path: scripts/install.sh
-					if-no-files-found: error
+  upload-install-scripts:
+    name: Upload install scripts
+    # These go on every release regardless of build outcome so a user can
+    # always curl the script even if the binaries for their platform failed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload install scripts
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-scripts
+          path: scripts/install.sh
+          if-no-files-found: error
 
-	publish:
-		name: Publish GitHub Release
-		needs: [build, upload-install-scripts]
-		runs-on: ubuntu-latest
-		steps:
-			- uses: actions/download-artifact@v4
-				with:
-					path: artifacts
-			- name: Generate SHA256SUMS
-				run: |
-					cd artifacts
-					find . -type f \( -name 'wenchat' -o -name 'wenchat.exe' \) -exec sha256sum {} \; > SHA256SUMS
-					cat SHA256SUMS
-			- name: Create GitHub Release
-				uses: softprops/action-gh-release@v2
-				with:
-					files: |
-						artifacts/wenchat-*/*
-						artifacts/install-scripts/*
-						artifacts/SHA256SUMS
-					generate_release_notes: true
-					fail_on_unmatched_files: true
-					# `v0.1.0` -> `0.1.0`. Drop the leading "v" for the title.
-					name: ${{ github.ref_name }}
-					body: |
-						## Install
+  publish:
+    name: Publish GitHub Release
+    needs: [build, upload-install-scripts]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Generate SHA256SUMS
+        run: |
+          cd artifacts
+          find . -type f \( -name 'wenchat' -o -name 'wenchat.exe' \) -exec sha256sum {} \; > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/wenchat-*/*
+            artifacts/install-scripts/*
+            artifacts/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          # `v0.1.0` -> `0.1.0`. Drop the leading "v" for the title.
+          name: ${{ github.ref_name }}
+          body: |
+            ## Install
 
-						### Quick (Linux / macOS)
-						```sh
-						curl -fsSL https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.sh | bash
-						```
+            ### Quick (Linux / macOS)
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.sh | bash
+            ```
 
-						### Windows (PowerShell)
-						```powershell
-						iwr -useb https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.ps1 | iex
-						```
+            ### Windows (PowerShell)
+            ```powershell
+            iwr -useb https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.ps1 | iex
+            ```
 
-						### Direct download
-						| Platform | File |
-						| --- | --- |
-						| Linux x86_64 | `wenchat-${{ github.ref_name }}-linux-x64` |
-						| macOS Apple Silicon | `wenchat-${{ github.ref_name }}-darwin-arm64` |
-						| Windows x64 | `wenchat-${{ github.ref_name }}-windows-x64.exe` |
+            ### Direct download
+            | Platform | File |
+            | --- | --- |
+            | Linux x86_64 | `wenchat-${{ github.ref_name }}-linux-x64` |
+            | macOS Apple Silicon | `wenchat-${{ github.ref_name }}-darwin-arm64` |
+            | Windows x64 | `wenchat-${{ github.ref_name }}-windows-x64.exe` |
 
-						### Upgrade an existing install
-						```sh
-						wenchat upgrade
-						```
+            ### Upgrade an existing install
+            ```sh
+            wenchat upgrade
+            ```
 
-						## First-run note (macOS / Windows)
-						Unsigned binaries trigger a one-time system prompt. Click through
-						it once; subsequent runs are silent. (No Apple Developer ID or
-						code-signing certificate is required for a CLI tool.)
+            ## First-run note (macOS / Windows)
+            Unsigned binaries trigger a one-time system prompt. Click through
+            it once; subsequent runs are silent. (No Apple Developer ID or
+            code-signing certificate is required for a CLI tool.)
