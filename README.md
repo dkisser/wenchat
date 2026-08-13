@@ -1,8 +1,8 @@
 # WenChat
 
-[English](./README.en.md) · [更新日志](./CHANGELOG.md) · [许可证](./LICENSE)
+[中文](./README.zh-CN.md) · [Changelog](./CHANGELOG.md) · [License](./LICENSE)
 
-> **局域网 P2P 终端聊天工具：mDNS 自动发现 + WebRTC 直连，无服务器、无 STUN/TURN、无云中继。**
+> **LAN-only P2P terminal chat: mDNS auto-discovery + direct WebRTC. No server, no STUN/TURN, no cloud relay.**
 
 [![license](https://img.shields.io/github/license/dkisser/wenchat?style=flat-square)](./LICENSE)
 [![node](https://img.shields.io/badge/node-%E2%89%A520-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org)
@@ -12,59 +12,84 @@
 ![transport](https://img.shields.io/badge/transport-webrtc_--_data_channel-333333?style=flat-square)
 ![discovery](https://img.shields.io/badge/discovery-mdns_--_bonjour-0078d4?style=flat-square)
 
-两台机器在同一个 Wi-Fi、有线或 VPN 里，打开两个终端，敲一行命令就能聊——不依赖公网、不需要登录、不上传任何消息。文本支持 Markdown 渲染，可以互发文件，可以双击消息复制原文，按下 `Ctrl+T` 切换鼠标选择模式。
+Open two terminals on the same Wi-Fi, wired, or VPN network and start
+chatting with a single command — no public internet, no accounts, no
+messages leaving your LAN. Text supports Markdown rendering, you can
+transfer files, double-click to copy, and press `Ctrl+T` to toggle the
+native mouse-selection mode.
 
-## 目录
+## Table of Contents
 
-- [特性](#特性)
-- [预览](#预览)
-- [快速开始](#快速开始)
-- [Slash 命令](#slash-命令)
-- [技术栈](#技术栈)
-- [项目结构](#项目结构)
-- [配置](#配置)
-- [开发](#开发)
-- [贡献](#贡献)
-- [安全](#安全)
-- [许可证](#许可证)
+- [Features](#features)
+- [Preview](#preview)
+- [Quick Start](#quick-start)
+- [Slash Commands](#slash-commands)
+- [Tech Stack](#tech-stack)
+- [Project Layout](#project-layout)
+- [Configuration](#configuration)
+- [Development](#development)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
 
-## 特性
+## Features
 
-**通信**
+**Networking**
 
-- 🔍 **mDNS / Bonjour 自动发现** —— 同网段打开即看到彼此，无需输入 IP
-- 🔗 **WebRTC DataChannel 直连** —— 纯 P2P，无 STUN / TURN、无中继服务器
-- 🛡️ **DTLS in-transit** —— 链路层加密，应用层纯文本（数据通道本身就是明文 SCTP）
-- 💓 **应用层心跳** —— 2 s ping / 4 s 超时，自动 pong，链路断开自动清理
+- 🔍 **mDNS / Bonjour auto-discovery** — peers on the same LAN appear
+  instantly, no IP typing required
+- 🔗 **WebRTC `DataChannel` direct** — pure P2P, no STUN / TURN, no
+  relay server
+- 🛡️ **DTLS in-transit** — link-layer encryption; the data channel
+  itself carries plaintext frames
+- 💓 **Application-layer heartbeat** — 2 s ping / 4 s timeout with
+  auto-pong and automatic cleanup on link loss
 
-**聊天体验**
+**Chat UX**
 
-- ✍️ **Markdown 渲染** —— 标题、列表、引用、代码块（带 `cli-highlight` 语法高亮）、粗体 / 斜体 / 删除线 / 行内代码 / 链接 / 分隔线 / 图片
-- 📋 **双击复制** —— 鼠标指向消息行，双击即复制原文到剪贴板；状态栏右侧 2 秒 toast 提示
-- 📑 **`/copy [n]` 命令** —— 1-based 倒数第 n 条文本消息，文件 / ping / pong 不计数
-- ⌨️ **`/mouse` 命令**（或 `Ctrl+T`）—— 一键切换 SGR 鼠标模式（`?1000h` + `?1006h`），退出 / 终端恢复时自动关闭
-- 🧭 **`Tab` 补全** —— 输入 `/fi` 自动补全为 `/file`，再按 `Tab` 加空格提示参数
+- ✍️ **Markdown rendering** — headings, lists, blockquotes, fenced code
+  blocks (with `cli-highlight` syntax highlighting), bold / italic /
+  strikethrough / inline code / links / horizontal rules / images
+- 📋 **Double-click to copy** — point at a chat row and double-click
+  to copy its original text; a 2 s toast in the status bar confirms
+- 📑 **`/copy [n]` command** — copy the n-th most recent text message
+  (1-based; file / ping / pong entries are skipped)
+- ⌨️ **`/mouse` command** (or `Ctrl+T`) — toggle SGR mouse tracking
+  (`?1000h` + `?1006h`); modes auto-release on exit
+- 🧭 **`Tab` completion** — type `/fi` → `/file`, press `Tab` again
+  for a trailing space
 
-**文件传输**
+**File transfer**
 
-- 📎 **`/file <path>`** —— 通过 DataChannel 发送任意本地文件
-- 🧩 **分块传输** —— 16 KiB / chunk，起始消息携带 32-bit checksum
-- 🗂️ **冲突安全保存** —— 默认存到 `~/Downloads/`，自动用 `foo (1).md`、`foo (2).md` 避让同名文件
+- 📎 **`/file <path>`** — send any local file over the data channel
+- 🧩 **Chunked** — 16 KiB / chunk with a 32-bit checksum recorded in
+  the start message
+- 🗂️ **Collision-safe save** — defaults to `~/Downloads/` with
+  `foo (1).md`, `foo (2).md` … to dodge existing names
 
-**网络弹性**
+**Network resilience**
 
-- 🌐 **多网卡启动选择器** —— 启动时列出本机可绑定地址（LAN / loopback / `0.0.0.0`），`↑/↓ + Enter` 选择
-- 🚇 **非 TTY 自动降级** —— 输出被重定向（`> out.log`、CI、SSH 不带 TTY）时跳过选择器，沿用检测到的局域网 IPv4
-- 🎯 **`/connect <host:port>`** —— 手动拨打任意信令端点（mDNS 找不到时兜底）
+- 🌐 **Startup bind-address picker** — multi-homed hosts (Wi-Fi +
+  wired + VPN + container bridges) get an interactive LAN / loopback /
+  `0.0.0.0` picker at startup
+- 🚇 **Non-TTY auto-degrade** — when stdout is redirected (`> out.log`,
+  CI, SSH without a TTY) the picker is skipped and the detected LAN
+  IPv4 is used silently
+- 🎯 **`/connect <host:port>`** — manually dial any signaling endpoint
+  as a fallback when mDNS can't see the peer
 
-**终端工程**
+**Terminal engineering**
 
-- 🖼️ **VT100 alt-screen** —— 进入全新背景，退出（`/exit` 或 `Ctrl+C`）后自动恢复原 shell 历史，无残影
-- 🪟 **SIGWINCH 自适应** —— 终端尺寸变化时自动重排
-- 💾 **持久命令历史** —— `~/.wechat/.wechat_history`，原子写入，上限 100 条
-- 🚦 **稳定性保护** —— 已连接时再次选择 peer 会提示「已连接，请先 `/disconnect`」
+- 🖼️ **VT100 alternate-screen buffer** — clean background on entry;
+  original shell history restored on exit (`/exit` or `Ctrl+C`), no
+  residue
+- 🪟 **SIGWINCH-aware** — re-lays out on terminal resize
+- 💾 **Persistent command history** — `~/.wechat/.wechat_history`,
+  atomic write, 100-entry cap
+- 🚦 **Stability guard** — selecting a peer while connected shows
+  "Already connected. Run `/disconnect` first to switch peer."
 
-## 预览
+## Preview
 
 ```
 ┌─ Status ──────────────────────────────────┐
@@ -72,11 +97,11 @@
 └───────────────────────────────────────────┘
 
 ┌─ Peers ──────────────┐  ┌─ Chat ────────────────────────────────────┐
-│ > alice (you)         │  │ [11:23] [peer] 这是一条 **Markdown** 测试 │
-│   bob (192.168.1.50)  │  │             *斜体*  `行内代码`             │
-│   carol               │  │            > 引用块                      │
-│                       │  │             1. 有序列表                   │
-│                       │  │             2. 第二项                     │
+│ > alice (you)         │  │ [11:23] [peer] This is a **Markdown** test │
+│   bob (192.168.1.50)  │  │             *italic*  `inline code`        │
+│   carol               │  │             > blockquote                  │
+│                       │  │             1. ordered list               │
+│                       │  │             2. item two                   │
 │                       │  │             ```ts                        │
 │                       │  │             const x: number = 42;        │
 │                       │  │             ```                         │
@@ -86,40 +111,47 @@
 > /help
 ```
 
-## 快速开始
+## Quick Start
 
-### 前置
+### Prerequisites
 
-- **Node.js ≥ 20**（macOS / Linux / Windows；**不要用 Bun 跑 CLI**——见下方说明）
-- **Bun ≥ 1.1**（驱动 install / build / test）
+- **Node.js ≥ 20** (macOS / Linux / Windows; **do not run the CLI on
+  Bun** — see note below)
+- **Bun ≥ 1.1** (drives install / build / test)
 
-### 安装
+### Install
 
 ```bash
 bun install
 ```
 
-### 运行
+### Run
 
-在终端 A：
+In terminal A:
 
 ```bash
 bun run cli alice
 ```
 
-在终端 B：
+In terminal B:
 
 ```bash
 bun run cli bob
 ```
 
-无需配置即可看到对方出现在 peer 列表中，`↑/↓ + Enter` 连接即可开始聊天。
+The peer appears in the list immediately — `↑/↓ + Enter` to connect
+and start chatting.
 
-> 第一个位置参数（`alice` / `bob`）是 wenchat 在局域网内的对等节点昵称（mDNS 服务实例名），**不会修改本机系统主机名**。若 macOS 系统设置里弹出「名称已更改」提醒，那是 mDNSResponder 把 Bonjour 服务名反射回共享视图，与 wenchat 无关。
+> The first positional argument (`alice` / `bob`) is WenChat's mDNS
+> service instance name — it does **not** modify your system's
+> hostname. If macOS shows a "name changed" alert in System Settings,
+> that's `mDNSResponder` reflecting the Bonjour service name back into
+> Sharing, and is unrelated to WenChat's code.
 
-### 选择监听地址
+### Picking a bind address
 
-多网卡机器（Wi-Fi + 有线 + VPN + 容器网桥）启动时会列出所有可绑定地址：
+On multi-homed hosts (Wi-Fi + wired + VPN + container bridges) the
+startup screen lists every bindable address:
 
 ```
 ┌────────────────────────────────────────────────────────────┐
@@ -131,123 +163,142 @@ bun run cli bob
 └────────────────────────────────────────────────────────────┘
 ```
 
-也可直接传地址跳过选择：
+You can also skip the picker by passing the address directly:
 
 ```bash
 bun run cli alice 9001 192.168.1.42
 ```
 
-输出被重定向时（`bun run cli alice > out.log`）自动沿用检测到的局域网 IPv4，不会弹出选择器。
+When stdout is redirected (`bun run cli alice > out.log`) the picker
+is suppressed and the detected LAN IPv4 is used automatically.
 
-## Slash 命令
+## Slash Commands
 
-输入 `/` 开头任意行即可触发。`Tab` 补全命令名。
+Type a line beginning with `/`. `Tab` completes command names.
 
-| 命令 | 说明 |
+| Command | Description |
 | --- | --- |
-| `/exit` | 退出 wenchat（关闭 pc、停止 mDNS、释放 alt-screen 与鼠标模式） |
-| `/disconnect` | 仅断开当前 WebRTC 会话，保留进程以便重连 |
-| `/mouse` | 切换 SGR 鼠标跟踪（与 `Ctrl+T` 等价） |
-| `/file <path>` | 通过 DataChannel 发送本地文件 |
-| `/help` | 列出全部命令 |
-| `/connect <host:port>` | 手动拨打任意信令端点 |
-| `/copy [n]` | 复制倒数第 `n` 条文本消息（默认 `n=1`） |
+| `/exit` | Quit WenChat (closes the pc, stops mDNS, releases alt-screen and mouse mode) |
+| `/disconnect` | Tear down the active WebRTC session without quitting |
+| `/mouse` | Toggle SGR mouse tracking (alias for `Ctrl+T`) |
+| `/file <path>` | Send a local file over the data channel |
+| `/help` | List every command |
+| `/connect <host:port>` | Manually dial any signaling endpoint |
+| `/copy [n]` | Copy the n-th most recent text message (default `n=1`) |
 
-输入框支持：
+Input ergonomics:
 
-- `↑` / `Ctrl+P` 上一条历史，`↓` / `Ctrl+N` 下一条；越过最新条目恢复草稿
-- `Tab` 补全命令名，再按一次 `Tab` 加空格提示参数
-- SGR 鼠标事件会被自动剥离，滚轮滚动不会污染输入
+- `↑` / `Ctrl+P` recall previous history; `↓` / `Ctrl+N` go forward;
+  past the newest entry the original draft is restored
+- `Tab` completes a command name; a second `Tab` adds a trailing
+  space to invite the argument
+- SGR mouse reports are stripped from typed input so wheel ticks
+  can't leak into the prompt
 
-## 技术栈
+## Tech Stack
 
-| 角色 | 技术 |
+| Role | Technology |
 | --- | --- |
-| 包管理 / 构建 / 测试 | Bun（workspace + test runner） |
-| CLI 运行时 | Node.js ≥ 20（通过 `tsx` 执行 `.ts` / `.tsx`） |
-| 终端 UI | [Ink](https://github.com/vadimdemedes/ink) + React 18 |
-| 渲染管线 | `marked`（GFM 关闭）→ `cli-highlight` → SGR 字符串 → `wrap-ansi` |
-| 传输 | [`werift`](https://github.com/shinyoshiaki/werift)（纯 JS WebRTC，DataChannel） |
-| 自动发现 | [`bonjour-service`](https://github.com/onuteam/bonjour-service)（mDNS） |
-| 信令 | 进程内 `http.createServer`，仅暴露 `POST /offer` 和 `POST /candidate` |
-| 代码规范 | TypeScript strict + Biome |
+| Package manager / build / test | Bun (workspace + test runner) |
+| CLI runtime | Node.js ≥ 20 (via `tsx` to execute `.ts` / `.tsx`) |
+| Terminal UI | [Ink](https://github.com/vadimdemedes/ink) + React 18 |
+| Rendering pipeline | `marked` (GFM disabled) → `cli-highlight` → SGR string → `wrap-ansi` |
+| Transport | [`werift`](https://github.com/shinyoshiaki/werift) (pure-JS WebRTC + DataChannel) |
+| Auto-discovery | [`bonjour-service`](https://github.com/onuteam/bonjour-service) (mDNS) |
+| Signaling | In-process `http.createServer` exposing only `POST /offer` and `POST /candidate` |
+| Code style | TypeScript strict + Biome |
 
-### 为什么 CLI 跑在 Node 而不是 Bun？
+### Why does the CLI run on Node and not Bun?
 
-`multicast-dns` 在 Bun 上 dgram bind 失败时会绕过 `uncaughtException` 直接终止进程（macOS 上的已知 bug，详见 commit `d02de50`）。CLI 因此切到 Node；Bun 仅负责 install / build / test，避开运行时的兼容性坑。
+`multicast-dns` has a known bug on Bun where a failed `dgram.bind()`
+on macOS bypasses `uncaughtException` and terminates the process
+outright (see commit `d02de50`). The CLI therefore runs on Node;
+Bun continues to drive install / build / test, sidestepping the
+runtime compatibility pitfall.
 
-## 项目结构
+## Project Layout
 
 ```
 wenchat/
 ├── apps/
-│   └── cli/                 @wenchat/cli  — Ink TUI 入口
+│   └── cli/                 @wenchat/cli  — Ink TUI entry point
 ├── packages/
-│   ├── protocol/            @wenchat/protocol — 共享消息/分块类型与序列化
-│   ├── core/                @wenchat/core — WebRTC / mDNS / 信令 / 心跳
-│   └── ui/                  @wenchat/ui — 可复用的 Ink 组件
-├── docs/                    内部设计文档
-├── scripts/                 smoke-lan-bind.ts 等开发期脚本
-├── biome.json               Lint / format 配置
-└── bunfig.toml              Bun 配置
+│   ├── protocol/            @wenchat/protocol — shared message / chunk types and serialization
+│   ├── core/                @wenchat/core — WebRTC / mDNS / signaling / heartbeat
+│   └── ui/                  @wenchat/ui — reusable Ink components
+├── docs/                    Internal design docs
+├── scripts/                 smoke-lan-bind.ts and other dev-time scripts
+├── biome.json               Lint / format config
+└── bunfig.toml              Bun config
 ```
 
-## 配置
+## Configuration
 
-CLI 仅通过位置参数配置，**不读环境变量**。
+The CLI is configured purely through positional arguments — **no
+environment variables are read**.
 
 ```bash
 bun run cli <nickname> [signalingPort] [signalingHost]
 ```
 
-| 参数 | 说明 | 默认 |
+| Argument | Description | Default |
 | --- | --- | --- |
-| `nickname` | mDNS TXT 字段中的展示名（不会修改本机主机名） | `user-<random>` |
-| `signalingPort` | 信令 HTTP 端口（`0` = 操作系统分配） | `0` |
-| `signalingHost` | 显式绑定地址（交互式启动时省略 → 弹出选择器） | — |
+| `nickname` | Display name carried in the mDNS TXT record (does not modify your system hostname) | `user-<random>` |
+| `signalingPort` | Signaling HTTP port (`0` = OS-assigned) | `0` |
+| `signalingHost` | Explicit bind address (omit on an interactive run to open the picker) | — |
 
-可选 flag：
+Optional flag:
 
-- `--no-mouse` —— 禁用 SGR 鼠标跟踪（终端不支持 SGR 时使用）
+- `--no-mouse` — disable SGR mouse tracking (for terminals that don't
+  support SGR)
 
-剪贴板行为：先尝试原生工具（`pbcopy` / `clip.exe` / `wl-copy` / `xclip` / `xsel`），都没有就降级到 OSC 52 直写 stdout（iTerm2 需要在 Preferences → Advanced 打开 "Allow clipboard read/write from shell"）。
+Clipboard resolution: native helper first (`pbcopy` / `clip.exe` /
+`wl-copy` / `xclip` / `xsel`), then OSC 52 written directly to
+stdout. iTerm2 requires Preferences → Advanced → "Allow clipboard
+read/write from shell" for OSC 52 to take effect.
 
-## 开发
+## Development
 
 ```bash
-# 全部单元 + 集成测试（Bun test runner）
+# All unit + integration tests (Bun test runner)
 bun test
 
-# 单独跑某个包的测试
+# Tests for a single package
 bun --filter '@wenchat/core' test
 
-# 类型检查 + 编译
+# Type-check + emit
 bun run build
 
 # Lint / format
 bun run lint
 bun run format
 
-# 信令 bind 回归检查
+# Signaling-bind regression check
 bun scripts/smoke-lan-bind.ts
 ```
 
-集成测试会把两个 `PeerConnection` 架在 `127.0.0.1` 上用 `setInterval` 轮询，单测慢启动属预期（~5 s 超时）。
+Integration tests wire two `PeerConnection`s on `127.0.0.1` with
+`setInterval` polls; the slow ~5 s timeouts are intentional.
 
-## 贡献
+## Contributing
 
-提交遵循 [Conventional Commits](https://www.conventionalcommits.org/)（`feat(scope): …` / `fix(scope): …` / `chore: …`）。改动前请：
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/)
+(`feat(scope): …` / `fix(scope): …` / `chore: …`). Before opening a
+PR please:
 
-1. `bun test` 跑通
-2. `bun run lint` 通过
-3. 信令或 bind 相关改动跑一遍 `bun scripts/smoke-lan-bind.ts`
+1. `bun test` is green
+2. `bun run lint` passes
+3. For any signaling / bind change, run `bun scripts/smoke-lan-bind.ts`
 
-Bug 与功能请求走 [Issues](https://github.com/dkisser/wenchat/issues)。
+Bugs and feature requests go to
+[Issues](https://github.com/dkisser/wenchat/issues).
 
-## 安全
+## Security
 
-请阅读 [SECURITY.md](./SECURITY.md)。安全敏感问题**不要**公开提 issue，通过 GitHub Security Advisories 或邮件私下报告。
+Please read [SECURITY.md](./SECURITY.md). **Do not** file public
+issues for security-sensitive reports — use GitHub Security
+Advisories or the private email listed there.
 
-## 许可证
+## License
 
 [MIT](./LICENSE) © 2026 dkisser
