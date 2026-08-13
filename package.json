@@ -28,6 +28,10 @@
 	"devDependencies": {
 		"@biomejs/biome": "^1.8.3",
 		"@types/node": "^20.0.0",
+		"@wenchat/cli": "workspace:*",
+		"@wenchat/core": "workspace:*",
+		"@wenchat/protocol": "workspace:*",
+		"@wenchat/ui": "workspace:*",
 		"@yao-pkg/pkg": "6.22.0",
 		"bun-types": "^1.1.0",
 		"esbuild": "0.28.2",
