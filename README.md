@@ -22,7 +22,8 @@ native mouse-selection mode.
 
 - [Features](#features)
 - [Preview](#preview)
-- [Quick Start](#quick-start)
+- [Installation](#installation)
+- [Quick Start](#quick-start-local-development)
 - [Slash Commands](#slash-commands)
 - [Tech Stack](#tech-stack)
 - [Project Layout](#project-layout)
@@ -111,7 +112,81 @@ native mouse-selection mode.
 > /help
 ```
 
-## Quick Start
+## Installation
+
+End users do not need Node.js, Bun, or any other runtime — wenchat
+ships as a single self-contained binary that embeds Node and all
+dependencies. No `npm install` step is required.
+
+### One-line install (Linux / macOS)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.sh | bash
+```
+
+The script auto-detects your platform (Linux x86_64 or Apple Silicon),
+downloads the matching binary, and installs it to
+`$HOME/.local/bin/wenchat` (no `sudo` required). If that directory is
+not on your `$PATH` already, the installer prints the line you need
+to add to your shell rc.
+
+### One-line install (Windows / PowerShell)
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.ps1 | iex
+```
+
+Installs to `%USERPROFILE%\bin\wenchat.exe` and appends that directory
+to your user `PATH`. Restart PowerShell afterwards.
+
+### Direct download
+
+Pick the binary that matches your platform from the
+[latest release](https://github.com/dkisser/wenchat/releases/latest).
+File names follow the pattern `wenchat-v<version>-<platform>[.exe]`
+— for example `wenchat-v0.1.0-linux-x64`.
+
+| Platform | Architecture |
+| --- | --- |
+| Linux | x86_64 |
+| macOS | Apple Silicon (arm64) |
+| Windows | x64 |
+
+Then on Linux / macOS: `chmod +x wenchat-*` and move it somewhere on
+your `$PATH`. On Windows: just run it from wherever you saved it
+(or move it onto your `PATH`).
+
+### Upgrade an existing install
+
+```sh
+wenchat upgrade              # download the latest release and replace
+wenchat upgrade --check-only # check only; print the newer version
+```
+
+The `upgrade` subcommand queries the GitHub API for the latest
+release, detects your platform, downloads the matching asset, and
+atomically replaces the running binary. **Windows is the exception**
+— the new file is staged next to the old one (a running `.exe`
+cannot be replaced) and the installer prints a one-line instruction
+to swap them manually.
+
+### First-run note (macOS / Windows)
+
+Unsigned binaries trigger a one-time system prompt:
+
+- **macOS Gatekeeper**: in Finder, right-click the binary → Open →
+  confirm. Subsequent runs are silent.
+- **Windows SmartScreen**: click "More info" → "Run anyway".
+  Subsequent runs are silent.
+
+This is the same pattern used by `deno`, `bun`, `hugo`, and `rustup`.
+WenChat does not ship with an Apple Developer ID or code-signing
+certificate because it is a CLI tool, not a graphical app.
+
+## Quick Start (local development)
+
+> End users should follow [Installation](#installation) above. This
+> section is for contributors and people hacking on wenchat itself.
 
 ### Prerequisites
 

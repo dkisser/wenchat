@@ -1,0 +1,38 @@
+name: CI
+
+on:
+	push:
+		branches: [main]
+	pull_request:
+		branches: [main]
+
+# Cancel in-progress runs of the same branch on new pushes; concurrency
+# isolation by ref keeps main fast and feature branches independent.
+concurrency:
+	group: ${{ github.workflow }}-${{ github.ref }}
+	cancel-in-progress: true
+
+jobs:
+	ci:
+		name: Lint + Test + Build
+		runs-on: ubuntu-latest
+		steps:
+			- uses: actions/checkout@v4
+			- name: Setup Bun
+				uses: oven-sh/setup-bun@v2
+				with:
+					bun-version: 1.1.34
+			- name: Install (frozen lockfile)
+				run: bun install --frozen-lockfile
+			- name: Lint
+				run: bun run lint
+			- name: Unit tests
+				# bun test uses the default test glob; packages/core/tests/integration/*
+				# has 5s setInterval timeouts and is intentionally excluded here.
+				run: bun test
+			- name: Build (tsc)
+				run: bun run build
+			- name: Smoke test (LAN bind regression)
+				# Validates the signaling server bind logic from commit d02de50
+				# (loopback blocked, LAN reachable) on the GitHub Linux runner.
+				run: bun scripts/smoke-lan-bind.ts

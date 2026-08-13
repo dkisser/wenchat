@@ -18,7 +18,8 @@
 
 - [特性](#特性)
 - [预览](#预览)
-- [快速开始](#快速开始)
+- [安装](#安装)
+- [快速开始](#快速开始本地开发)
 - [Slash 命令](#slash-命令)
 - [技术栈](#技术栈)
 - [项目结构](#项目结构)
@@ -86,7 +87,73 @@
 > /help
 ```
 
-## 快速开始
+## 安装
+
+终端用户无需安装 Node.js、Bun 或其他运行时 —— wenchat 以单一可执行文件分发，内部已嵌入 Node 运行时与所有依赖。**不需要 `npm install`**。
+
+### 一行安装（Linux / macOS）
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.sh | bash
+```
+
+脚本自动识别平台（Linux x86_64 或 Apple Silicon），下载对应二进制并安装到
+`$HOME/.local/bin/wenchat`（无需 `sudo`）。若该目录不在你的 `$PATH`，
+安装脚本会提示需要追加到 shell rc 的那一行。
+
+### 一行安装（Windows / PowerShell）
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.ps1 | iex
+```
+
+安装到 `%USERPROFILE%\bin\wenchat.exe` 并自动把该目录追加到用户
+`PATH`。完成后请重启 PowerShell。
+
+### 直接下载
+
+从 [最新发布](https://github.com/dkisser/wenchat/releases/latest) 页
+挑选与你平台对应的二进制。文件名遵循 `wenchat-v<version>-<platform>[.exe]`
+模式（例如 `wenchat-v0.1.0-linux-x64`）。
+
+| 平台 | 架构 |
+| --- | --- |
+| Linux | x86_64 |
+| macOS | Apple Silicon（arm64） |
+| Windows | x64 |
+
+Linux / macOS 上：`chmod +x wenchat-*` 后移到 `$PATH` 任意目录。Windows
+上：直接双击运行，或放到 `PATH` 中。
+
+### 升级已有安装
+
+```sh
+wenchat upgrade              # 下载最新 release 并原地替换
+wenchat upgrade --check-only # 仅检查，输出是否有新版本
+```
+
+`upgrade` 子命令查询 GitHub API 的最新 release，识别你的平台，下载
+对应资源，**原子替换**当前运行的二进制。**Windows 是例外**——
+新文件会暂存在旧文件旁边（运行中的 `.exe` 无法被覆盖），脚本会
+打印一行手动替换的提示。
+
+### 首次运行说明（macOS / Windows）
+
+未签名的二进制会触发一次性的系统提示：
+
+- **macOS Gatekeeper**：在 Finder 里右键二进制 → 打开 → 确认。
+  之后静默运行。
+- **Windows SmartScreen**：点击「更多信息」→「仍要运行」。
+  之后静默运行。
+
+`deno` / `bun` / `hugo` / `rustup` 等未签名 CLI 工具都是这个流程。
+wenchat 不附带 Apple Developer ID 或代码签名证书 —— 它是 CLI 工具，
+不是图形化 app。
+
+## 快速开始（本地开发）
+
+> 终端用户请参考上面的 [安装](#安装) 一节。本节面向 wenchat 自身的
+> 贡献者与本地调试。
 
 ### 前置
 
