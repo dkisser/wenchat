@@ -3,18 +3,30 @@ import { type IncomingOfferInfo, PeerConnection } from "../../src/peer";
 
 // Linux kernel is stricter than macOS about UDP port-unreachable: a STUN
 // packet landing on a peer socket that has already closed turns into an
-// 'error' event on werift's dgram socket, which surfaces as an unhandled
-// exception. macOS silently drops the ICMP. We install a process-level
-// filter so the regression assertion (which is about state-change events,
-// not transport health) stays focused on what it's testing.
+// 'error' event on werift's dgram socket, which bun:test's
+// uncaughtException listener converts into a test failure. macOS silently
+// drops the ICMP.
+//
+// We can't reach werift's internal sockets, but we CAN install a
+// process-level handler that runs before bun:test's (using
+// `prependListener`) and silently swallows the port-unreachable family.
+// Any other error re-throws so unrelated failures still surface.
 const suppressUdpRefused = (): (() => void) => {
 	const handler = (err: unknown): void => {
 		const code = (err as { code?: string } | null)?.code;
-		if (code === "ECONNREFUSED" || code === "EHOSTUNREACH") return;
-		// Re-throw anything else so unrelated failures still surface.
+		const msg = err instanceof Error ? err.message : String(err);
+		if (
+			code === "ECONNREFUSED" ||
+			code === "EHOSTUNREACH" ||
+			msg.includes("ECONNREFUSED") ||
+			msg.includes("EHOSTUNREACH")
+		) {
+			return;
+		}
+		// Let any other error propagate.
 		throw err;
 	};
-	process.on("uncaughtException", handler);
+	process.prependListener("uncaughtException", handler);
 	return () => {
 		process.off("uncaughtException", handler);
 	};
@@ -144,6 +156,7 @@ describe("PeerConnection", () => {
 		});
 
 		it("leaves the signaling server alive so a new connect can succeed", async () => {
+			const restore = suppressUdpRefused();
 			const alice = new PeerConnection();
 			const bob = new PeerConnection();
 			try {
@@ -161,6 +174,7 @@ describe("PeerConnection", () => {
 			} finally {
 				alice.close();
 				bob.close();
+				restore();
 			}
 		});
 	});

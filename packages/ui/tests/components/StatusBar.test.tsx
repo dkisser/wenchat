@@ -1,14 +1,16 @@
 import { describe, expect, it } from "bun:test";
+import chalk from "chalk";
 import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { StatusBar } from "../../src/StatusBar";
 
-// Force chalk/ink to emit ANSI escape codes regardless of the runner's TTY
-// detection. On GitHub Actions `process.stdout.isTTY` is false (and `CI=true`
-// is set), so ink's color detection would otherwise strip the `\x1b[31m`
-// red escape this test depends on. Setting FORCE_COLOR=1 is the upstream
-// convention; chalk 5+ reads it before any other signal.
-process.env.FORCE_COLOR = "1";
+// Force chalk to emit ANSI escape codes regardless of the runner's TTY
+// detection. On GitHub Actions `process.stdout.isTTY` is false (and
+// `CI=true` is set), so chalk/ink would otherwise strip the `\x1b[31m`
+// red escape this test depends on. Setting `chalk.level = 1` is the
+// direct knob (chalk 5+ reads it lazily on every colour call); the
+// FORCE_COLOR env var is left alone for any other consumer.
+chalk.level = 1;
 
 describe("StatusBar", () => {
 	it("renders online status with peer name", () => {
