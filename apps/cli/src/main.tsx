@@ -12,10 +12,39 @@ import { App } from "./App";
 import { enterAltScreen, exitAltScreen } from "./altScreen";
 import { enterMouseMode, exitMouseMode } from "./mouseMode";
 import { installTerminalSafetyNet } from "./terminalSafetyNet";
+import { HELP_TEXT, getCurrentVersion, upgradeCli } from "./updater";
+
+// Subcommand dispatch. MUST run before any TUI / safety-net setup so that
+// `wenchat version`, `wenchat upgrade`, and `wenchat help` never touch the
+// terminal (no alt screen, no mouse mode, no React mount).
+const rawArgs = process.argv.slice(2);
+const first = rawArgs[0];
+
+if (first === "version" || first === "--version" || first === "-v") {
+	process.stdout.write(`wenchat ${getCurrentVersion()}\n`);
+	process.exit(0);
+}
+if (first === "help" || first === "--help" || first === "-h") {
+	process.stdout.write(HELP_TEXT);
+	process.exit(0);
+}
+if (first === "upgrade" || first === "update") {
+	// Top-level await (ES2022) suspends the module so we never fall through
+	// into the TUI mount below. process.exit terminates before any React tree
+	// could materialize. Biome rejects top-level `return`, hence this shape.
+	const checkOnly = rawArgs.includes("--check-only");
+	try {
+		const code = await upgradeCli({ checkOnly });
+		process.exit(code);
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`upgrade failed: ${msg}\n`);
+		process.exit(1);
+	}
+}
 
 // Filter --no-mouse (and any future flags) out of argv before the positional
 // parsing, so `args[0..2]` retain their current shape.
-const rawArgs = process.argv.slice(2);
 const flags = new Set<string>();
 const positional: string[] = [];
 for (const arg of rawArgs) {
