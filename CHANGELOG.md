@@ -5,6 +5,23 @@ All notable changes to WenChat will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-08-14
+
+### Fixed
+
+- **`PeerList` was always empty** — the `DiscoveryService.start()` Promise
+  executor synchronously threw `TypeError: undefined is not an object
+  (evaluating 'this.service.on')` because it read
+  `published.service`, but `bonjour-service@1.x` returns the Service
+  EventEmitter directly from `publish()`. `apps/cli/src/App.tsx`
+  swallowed the rejection with `.catch(() => {})`, so mDNS never
+  published or browsed: both ends ran, neither side ever saw the other
+  via the LAN, and the only workaround was `/connect <ip>:<port>`.
+  Reading `published` directly restores auto-discovery. The unit-test
+  mock was previously returning `{ service }`, which masked the bug;
+  it now matches the real shape and a regression test fails on the broken
+  access pattern.
+
 ## [0.1.0] - 2026-08-12
 
 ### Added
@@ -75,3 +92,4 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `*.test.ts(x)` from build output defensively.
 
 [0.1.0]: https://github.com/dkisser/wenchat/releases/tag/v0.1.0
+[0.1.2]: https://github.com/dkisser/wenchat/releases/tag/v0.1.2

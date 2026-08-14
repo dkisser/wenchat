@@ -3,7 +3,7 @@
 	"description": "WenChat UI — reusable Ink (React) components for terminal chat: ChatView, InputBox, PeerList, StatusBar, markdown",
 	"keywords": ["wenchat", "ink", "react", "tui", "terminal-ui", "components"],
 	"license": "MIT",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"type": "module",
 	"main": "./src/index.tsx",
 	"types": "./src/index.tsx",
