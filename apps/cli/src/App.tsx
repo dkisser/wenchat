@@ -139,9 +139,13 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		// loopback. Advertise a concrete address in that case.
 		const advertiseHost = resolveAdvertiseHost(bindHost);
 
-		discovery.onPeersUpdated(setPeers);
-		discovery.start(displayName, signalingPort, advertiseHost).catch(() => {});
-		peerConnection.startListening(signalingPort, bindHost, advertiseHost).catch(() => {});
+		// Subscribe BEFORE we kick off discovery so any peer "up" event
+		// that races ahead of `discovery.start` resolving is delivered to
+		// the React state. Capture the unsubscriber so the cleanup can
+		// detach it (previously this fired-and-forgot the registration,
+		// which is fine on mount but leaks if `bindHost` ever changes).
+		const unsubscribePeers = discovery.onPeersUpdated(setPeers);
+
 		const unsubscribeIncoming = peerConnection.onIncoming(({ signalingHost, signalingPort }) => {
 			// Receiver side: someone is dialing us. Resolve the
 			// signaling endpoint to a PeerInfo (either a discovered
@@ -211,7 +215,31 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			}
 		});
 
+		// Sequence the two starts so the mDNS publish carries the *real*
+		// bound port — not whatever value the caller passed in (typically
+		// `0`, "let the OS pick"). Publishing port 0 leaves LAN peers
+		// with no dial target: `parseService` drops a record whose
+		// `signalingPort` and SRV `port` are both `<= 0`, so neither side
+		// ever sees the other in its peer list. Sequencing is the fix.
+		let cancelled = false;
+		void (async () => {
+			try {
+				await peerConnection.startListening(signalingPort, bindHost, advertiseHost);
+				if (cancelled) return;
+				const realPort = peerConnection.getSignalingPort();
+				await discovery.start(displayName, realPort, advertiseHost);
+			} catch {
+				// Signaling / discovery failures are swallowed at the CLI
+				// boundary, matching the original `.catch(() => {})` on
+				// both calls. If you ever want to surface them, attach a
+				// logger here — `process.stderr` writes would otherwise
+				// corrupt the alt-screen frame.
+			}
+		})();
+
 		return () => {
+			cancelled = true;
+			unsubscribePeers();
 			unsubscribeIncoming();
 			unsubscribeMessage();
 			unsubscribeState();

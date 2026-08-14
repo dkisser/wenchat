@@ -121,6 +121,22 @@ describe("DiscoveryService", () => {
 		expect(bonjour.published[0]).toMatchObject({ host: "127.0.0.1" });
 		await service.stop();
 	});
+
+	// Boundary guard: callers (notably `App.tsx` in the CLI) hand us the
+	// port the HTTP signaling server actually bound. If that thread races
+	// or somebody forgets to read `getSignalingPort()` first, a `0` would
+	// otherwise sneak into both the SRV record and the TXT record — and
+	// `parseService` then drops the peer entirely on the receiving side.
+	// Reject at the boundary so the bug surfaces immediately, not as "why
+	// doesn't the other side show up in the peer list?".
+	it("rejects signalingPort <= 0 so a missing bind port fails fast", async () => {
+		const bonjour = createMockBonjour();
+		for (const badPort of [0, -1]) {
+			const service = new DiscoveryService(bonjour as never);
+			await expect(service.start("alice", badPort)).rejects.toThrow(/signalingPort/);
+			expect(bonjour.published.length).toBe(0);
+		}
+	});
 });
 
 describe("DiscoveryService localId persistence", () => {

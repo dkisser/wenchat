@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { TextMessage } from "@wenchat/protocol";
+import { DiscoveryService } from "../../src/discovery";
 import { PeerConnection } from "../../src/peer";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -229,5 +230,51 @@ describe("core integration", () => {
 		expect(incomingIdx).toBeGreaterThanOrEqual(0);
 		expect(connectedIdx).toBeGreaterThanOrEqual(0);
 		expect(incomingIdx).toBeLessThan(connectedIdx);
+	});
+});
+
+describe("core integration: discovery ↔ signaling wiring", () => {
+	// Regression: when `cli` is launched without a port arg, main.tsx hands
+	// `signalingPort = 0` to startListening(). Node binds an ephemeral port
+	// and `getSignalingPort()` is the only way to read it back. The mDNS
+	// publish must use that resolved port — publishing 0 makes parseService
+	// drop the peer on the LAN. This test exercises the contract between
+	// PeerConnection and DiscoveryService: the caller resolves the real
+	// port first, then publishes.
+	it("publishes the port actually bound by startListening(0)", async () => {
+		const published: Array<{ port: number; txt: { signalingPort: string } }> = [];
+		const fakeBonjour = {
+			publish: (opts: Record<string, unknown>) => {
+				published.push(opts as { port: number; txt: { signalingPort: string } });
+				return {
+					stop: (cb: () => void) => cb(),
+					on: (event: "up" | "error", handler: (arg?: unknown) => void) => {
+						if (event === "up") queueMicrotask(() => handler());
+					},
+				};
+			},
+			find: () => ({
+				stop: () => {},
+				on: (_event: "up" | "down", _handler: (service: unknown) => void) => {},
+			}),
+		};
+
+		const peer = new PeerConnection();
+		const discovery = new DiscoveryService(fakeBonjour as never);
+
+		try {
+			await peer.startListening(0);
+			const realPort = peer.getSignalingPort();
+			expect(realPort).toBeGreaterThan(0);
+
+			await discovery.start("alice", realPort);
+
+			expect(published.length).toBe(1);
+			expect(published[0].port).toBe(realPort);
+			expect(published[0].txt.signalingPort).toBe(String(realPort));
+		} finally {
+			await discovery.stop().catch(() => {});
+			peer.close();
+		}
 	});
 });

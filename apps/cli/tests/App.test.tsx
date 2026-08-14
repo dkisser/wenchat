@@ -148,4 +148,36 @@ describe("App startup host picker", () => {
 		expect(advertiseHost).not.toBe("0.0.0.0");
 		expect(publish.mock.calls[0][2]).toBe(advertiseHost);
 	});
+
+	// Regression: when `cli` is launched without a port arg, `main.tsx`
+	// passes `signalingPort = 0` and the HTTP server binds an ephemeral
+	// port. The mDNS publish must use that resolved port — publishing 0
+	// makes `parseService` drop the peer on the LAN (see the
+	// `signalingPort <= 0` defensive guard in discovery.ts). The wiring
+	// pins `getSignalingPort()` as the source of truth for the publish.
+	it("publishes the bound port, not the user-supplied 0", async () => {
+		const listenSpy = spyOn(PeerConnection.prototype, "startListening").mockResolvedValue(
+			undefined,
+		);
+		spies.push(listenSpy);
+		// startListening is stubbed, so getSignalingPort would otherwise
+		// still read the unmocked signaling server's port (0). Patch it to
+		// hand back whatever a real bind would have produced.
+		const getPortSpy = spyOn(PeerConnection.prototype, "getSignalingPort").mockReturnValue(54321);
+		spies.push(getPortSpy);
+		const publishSpy = spyOn(DiscoveryService.prototype, "start").mockResolvedValue(undefined);
+		spies.push(publishSpy);
+
+		instance = render(<App displayName="alice" signalingPort={0} signalingHost="127.0.0.1" />);
+		const { stdin } = instance;
+		await tick();
+		stdin.write(ENTER);
+		await tick();
+
+		expect(publishSpy).toHaveBeenCalledTimes(1);
+		const [name, port, advertiseHost] = publishSpy.mock.calls[0];
+		expect(name).toBe("alice");
+		expect(port).toBe(54321); // the bug fix: real bound port, not 0
+		expect(advertiseHost).toBe("127.0.0.1");
+	});
 });

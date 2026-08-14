@@ -66,6 +66,20 @@ export class DiscoveryService {
 		signalingPort: number,
 		signalingHost = "127.0.0.1",
 	): Promise<void> {
+		// Boundary guard: callers (notably `App.tsx` in the CLI) hand us the
+		// port the HTTP signaling server actually bound. If that thread
+		// races — or somebody forgets to read `getSignalingPort()` first —
+		// a `0` would otherwise sneak into both the SRV record and the TXT
+		// record, and `parseService` would then drop the peer entirely on
+		// the receiving side. Reject at the boundary so the bug surfaces
+		// immediately, not as "why doesn't the other side show up in the
+		// peer list?". `0` is a legitimate "OS, pick for me" signal for
+		// `server.listen()` but not for what we advertise.
+		if (signalingPort <= 0) {
+			throw new Error(
+				`DiscoveryService.start: signalingPort must be > 0 (the port actually bound by the signaling server); got ${signalingPort}`,
+			);
+		}
 		return new Promise((resolve, reject) => {
 			// The `name` below is a Bonjour/mDNS service instance name,
 			// published over multicast DNS (224.0.0.251) only for the lifetime
