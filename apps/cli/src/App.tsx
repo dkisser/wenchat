@@ -466,10 +466,6 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		copyAndReport(found.payload.text);
 	};
 
-	const handleUnknownCommand = (name: string, _arg: string) => {
-		appendSystemMessage(`Unknown command: /${name}. Type /help for the list.`);
-	};
-
 	const { rows, columns } = useTerminalSize();
 	const layout = computeChatLayout({
 		rows,
@@ -621,7 +617,6 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 					onChange={setInputText}
 					onSubmit={handleSend}
 					onCommand={handleCommand}
-					onUnknownCommand={handleUnknownCommand}
 					onError={(err) => appendSystemMessage(`History unavailable: ${getErrorMessage(err)}`)}
 				/>
 			</Box>

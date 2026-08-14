@@ -42,6 +42,17 @@ export const MAGIC_COMMANDS: readonly CommandSpec[] = Object.freeze([
 	},
 ]);
 
+const KNOWN_COMMAND_NAMES: ReadonlySet<string> = new Set(MAGIC_COMMANDS.map((c) => c.name));
+
+/**
+ * True when `name` matches one of the registered MAGIC_COMMANDS entries.
+ * Callers use this to gate dispatch: anything else (including `/`-prefixed
+ * paths) should fall through to the plain-text submission path.
+ */
+export function isKnownCommand(name: string): boolean {
+	return KNOWN_COMMAND_NAMES.has(name);
+}
+
 export type ParsedCommand = {
 	name: string;
 	arg: string;

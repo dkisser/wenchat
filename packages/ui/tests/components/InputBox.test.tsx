@@ -11,39 +11,21 @@ const ESC = "\u001B";
 describe("InputBox", () => {
 	it("renders input prompt", () => {
 		const { lastFrame } = render(
-			<InputBox
-				value=""
-				onChange={() => {}}
-				onSubmit={() => {}}
-				onCommand={() => {}}
-				onUnknownCommand={() => {}}
-			/>,
+			<InputBox value="" onChange={() => {}} onSubmit={() => {}} onCommand={() => {}} />,
 		);
 		expect(lastFrame()).toContain(">");
 	});
 
 	it("renders the current value", () => {
 		const { lastFrame } = render(
-			<InputBox
-				value="hello"
-				onChange={() => {}}
-				onSubmit={() => {}}
-				onCommand={() => {}}
-				onUnknownCommand={() => {}}
-			/>,
+			<InputBox value="hello" onChange={() => {}} onSubmit={() => {}} onCommand={() => {}} />,
 		);
 		expect(lastFrame()).toContain("hello");
 	});
 
 	it("renders the command name when the input is a slash command", () => {
 		const { lastFrame } = render(
-			<InputBox
-				value="/help"
-				onChange={() => {}}
-				onSubmit={() => {}}
-				onCommand={() => {}}
-				onUnknownCommand={() => {}}
-			/>,
+			<InputBox value="/help" onChange={() => {}} onSubmit={() => {}} onCommand={() => {}} />,
 		);
 		expect(lastFrame()).toContain("/help");
 	});
@@ -55,7 +37,6 @@ describe("InputBox", () => {
 				onChange={() => {}}
 				onSubmit={() => {}}
 				onCommand={() => {}}
-				onUnknownCommand={() => {}}
 			/>,
 		);
 		const frame = lastFrame();
@@ -65,13 +46,7 @@ describe("InputBox", () => {
 
 	it("renders an unknown slash command verbatim", () => {
 		const { lastFrame } = render(
-			<InputBox
-				value="/nope arg"
-				onChange={() => {}}
-				onSubmit={() => {}}
-				onCommand={() => {}}
-				onUnknownCommand={() => {}}
-			/>,
+			<InputBox value="/nope arg" onChange={() => {}} onSubmit={() => {}} onCommand={() => {}} />,
 		);
 		expect(lastFrame()).toContain("/nope");
 		expect(lastFrame()).toContain("arg");
@@ -79,13 +54,7 @@ describe("InputBox", () => {
 
 	it("draws a trailing caret on plain text", () => {
 		const { lastFrame } = render(
-			<InputBox
-				value="hello"
-				onChange={() => {}}
-				onSubmit={() => {}}
-				onCommand={() => {}}
-				onUnknownCommand={() => {}}
-			/>,
+			<InputBox value="hello" onChange={() => {}} onSubmit={() => {}} onCommand={() => {}} />,
 		);
 		const frame = lastFrame() ?? "";
 		expect(frame).toContain("hello");
@@ -114,7 +83,6 @@ describe("InputBox keyboard/mouse arbitration", () => {
 				onChange={(next) => changes.push(next)}
 				onSubmit={() => {}}
 				onCommand={() => {}}
-				onUnknownCommand={() => {}}
 			/>,
 		);
 		return { changes, stdin };
@@ -185,7 +153,6 @@ describe("InputBox Tab completion", () => {
 				onChange={(next) => changes.push(next)}
 				onSubmit={() => {}}
 				onCommand={() => {}}
-				onUnknownCommand={() => {}}
 			/>,
 		);
 		return { changes, stdin };
@@ -281,5 +248,70 @@ describe("InputBox Tab completion", () => {
 		await tick();
 
 		expect(changes).toEqual(["/mouse"]);
+	});
+});
+
+describe("InputBox Enter dispatch", () => {
+	const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+	type DispatchCapture = {
+		readonly submits: string[];
+		readonly commands: ReadonlyArray<readonly [string, string]>;
+		readonly stdin: { write: (data: string) => void };
+	};
+
+	function mountWith(value: string): DispatchCapture {
+		const submits: string[] = [];
+		const commands: Array<[string, string]> = [];
+		const { stdin } = render(
+			<InputBox
+				value={value}
+				onChange={() => {}}
+				onSubmit={(text) => submits.push(text)}
+				onCommand={(name, arg) => commands.push([name, arg])}
+			/>,
+		);
+		return { submits, commands, stdin };
+	}
+
+	// Carriage return is what ink's key parser sees as the Enter key.
+	const CR = "\r";
+
+	it("dispatches known commands via onCommand", async () => {
+		const { submits, commands, stdin } = mountWith("/file /etc/hosts");
+		await tick();
+
+		stdin.write(CR);
+		await tick();
+
+		expect(commands).toEqual([["file", "/etc/hosts"]]);
+		expect(submits).toEqual([]);
+	});
+
+	it("sends absolute paths as plain text via onSubmit", async () => {
+		// Regression for the reported bug: paths like
+		// /Users/wenchen/workspace/yhh/claw-yhh/.venv/bin/python used to
+		// be misidentified as slash commands and silently dropped.
+		const { submits, commands, stdin } = mountWith(
+			"/Users/wenchen/workspace/yhh/claw-yhh/.venv/bin/python",
+		);
+		await tick();
+
+		stdin.write(CR);
+		await tick();
+
+		expect(submits).toEqual(["/Users/wenchen/workspace/yhh/claw-yhh/.venv/bin/python"]);
+		expect(commands).toEqual([]);
+	});
+
+	it("sends unrecognized slash-prefixed text as plain text", async () => {
+		const { submits, commands, stdin } = mountWith("/xyz");
+		await tick();
+
+		stdin.write(CR);
+		await tick();
+
+		expect(submits).toEqual(["/xyz"]);
+		expect(commands).toEqual([]);
 	});
 });

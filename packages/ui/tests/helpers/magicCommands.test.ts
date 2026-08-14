@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { MAGIC_COMMANDS, matchCommands, parseCommand, splitCommand } from "../../src/magicCommands";
+import {
+	MAGIC_COMMANDS,
+	isKnownCommand,
+	matchCommands,
+	parseCommand,
+	splitCommand,
+} from "../../src/magicCommands";
 
 describe("parseCommand", () => {
 	it("returns null for plain text", () => {
@@ -59,6 +65,28 @@ describe("MAGIC_COMMANDS", () => {
 
 	it("is frozen", () => {
 		expect(Object.isFrozen(MAGIC_COMMANDS)).toBe(true);
+	});
+});
+
+describe("isKnownCommand", () => {
+	it("returns true for every registered name", () => {
+		for (const cmd of MAGIC_COMMANDS) {
+			expect(isKnownCommand(cmd.name)).toBe(true);
+		}
+	});
+
+	it("returns false for unknown names", () => {
+		expect(isKnownCommand("xyz")).toBe(false);
+		expect(isKnownCommand("filex")).toBe(false);
+		expect(isKnownCommand("")).toBe(false);
+	});
+
+	it("returns false for absolute paths (the /Users/... regression)", () => {
+		// Regression: paths like /Users/wenchen/workspace/yhh/claw-yhh/.venv/bin/python
+		// used to be misidentified as slash commands. isKnownCommand must
+		// reject the leading-slash path so InputBox falls through to onSubmit.
+		expect(isKnownCommand("Users/wenchen/workspace/yhh/claw-yhh/.venv/bin/python")).toBe(false);
+		expect(isKnownCommand("Users/me/Some File.txt")).toBe(false);
 	});
 });
 

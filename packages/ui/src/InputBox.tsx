@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useRef, useState } from "react";
 import { HistoryStore } from "./historyStore";
-import { matchCommands, parseCommand, splitCommand } from "./magicCommands";
+import { isKnownCommand, matchCommands, parseCommand, splitCommand } from "./magicCommands";
 import { stripMouseReports } from "./mouseEvents";
 
 export type InputBoxProps = {
@@ -9,7 +9,6 @@ export type InputBoxProps = {
 	onChange: (next: string) => void;
 	onSubmit: (text: string) => void;
 	onCommand: (name: string, arg: string) => void;
-	onUnknownCommand: (name: string, arg: string) => void;
 	/**
 	 * Reported when persisted history fails to load. Never log to the console
 	 * from here: ink patches `console.*` into `log.clear(); write; re-render`,
@@ -22,8 +21,10 @@ export type InputBoxProps = {
  * Controlled single-line input with shell-style history recall.
  *
  * Behavior:
- * - Enter dispatches the line as before (command → onCommand/onUnknownCommand,
- *   plain text → onSubmit).
+ * - Enter dispatches the line as a known command via onCommand, or as plain
+ *   text via onSubmit. Anything starting with `/` that is not in
+ *   {@link MAGIC_COMMANDS} — including absolute paths — is sent as plain
+ *   text.
  * - Up / Ctrl+P recall the previous entry; Down / Ctrl+N go forward. Going
  *   past the newest entry restores the draft the user was typing before
  *   they started scrolling, mirroring bash/zsh/readline.
@@ -31,14 +32,7 @@ export type InputBoxProps = {
  *   from `~/.wechat/.wechat_history` on mount and writes back atomically
  *   after each submit.
  */
-export function InputBox({
-	value,
-	onChange,
-	onSubmit,
-	onCommand,
-	onUnknownCommand,
-	onError,
-}: InputBoxProps) {
+export function InputBox({ value, onChange, onSubmit, onCommand, onError }: InputBoxProps) {
 	const onChangeRef = useRef(onChange);
 	useEffect(() => {
 		onChangeRef.current = onChange;
@@ -117,13 +111,8 @@ export function InputBox({
 		if (key.return) {
 			if (value.length > 0) {
 				const parsed = parseCommand(value);
-				if (parsed) {
-					const known = ["exit", "file", "help", "connect", "disconnect", "mouse", "copy"];
-					if (known.includes(parsed.name)) {
-						onCommand(parsed.name, parsed.arg);
-					} else {
-						onUnknownCommand(parsed.name, parsed.arg);
-					}
+				if (parsed && isKnownCommand(parsed.name)) {
+					onCommand(parsed.name, parsed.arg);
 				} else if (value.trim().length > 0) {
 					onSubmit(value);
 				}
