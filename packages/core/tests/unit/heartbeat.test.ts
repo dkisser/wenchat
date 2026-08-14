@@ -120,4 +120,52 @@ describe("HeartbeatScheduler", () => {
 		h.hb.stop();
 		// No throw, no extra timers.
 	});
+
+	// Regression: on the acceptor side the WebRTC `connected` event can
+	// fire before `ondatachannel`, so the Session may start the heartbeat
+	// before its DataTransport is attached. The heartbeat must not call
+	// send() while canSend() returns false, otherwise Session.send() throws
+	// "Data channel not ready" and the test runner sees an uncaught
+	// exception.
+	it("skips ticks while canSend() is false", async () => {
+		let canSend = false;
+		const h = makeHarness({ intervalMs: 20, timeoutMs: 5000 });
+		h.hb = new HeartbeatScheduler({
+			send: (m) => h.sends.push(m),
+			onTimeout: () => {
+				h.timeouts.count += 1;
+			},
+			canSend: () => canSend,
+			intervalMs: 20,
+			timeoutMs: 5000,
+		});
+		h.hb.start();
+		await sleep(95);
+		expect(h.sends.filter((m) => m.type === "ping").length).toBe(0);
+
+		canSend = true;
+		await sleep(60);
+		h.hb.stop();
+		expect(h.sends.filter((m) => m.type === "ping").length).toBeGreaterThanOrEqual(1);
+	});
+
+	it("opens the send gate mid-run without double-starting", async () => {
+		let canSend = false;
+		const h = makeHarness({ intervalMs: 20, timeoutMs: 5000 });
+		h.hb = new HeartbeatScheduler({
+			send: (m) => h.sends.push(m),
+			onTimeout: () => {
+				h.timeouts.count += 1;
+			},
+			canSend: () => canSend,
+			intervalMs: 20,
+			timeoutMs: 5000,
+		});
+		h.hb.start();
+		await sleep(30);
+		canSend = true;
+		await sleep(80);
+		h.hb.stop();
+		expect(h.sends.filter((m) => m.type === "ping").length).toBeGreaterThanOrEqual(2);
+	});
 });

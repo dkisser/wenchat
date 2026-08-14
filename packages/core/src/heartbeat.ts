@@ -4,6 +4,14 @@ import { type Message, createPing, createPong } from "@wenchat/protocol";
 export type HeartbeatSchedulerOptions = {
 	send: (message: Message) => void;
 	onTimeout: () => void;
+	/**
+	 * Optional gate: heartbeat only emits pings when this returns true. The
+	 * caller uses it to avoid ticking into a transport that is not attached
+	 * yet — for example, on the acceptor side WebRTC `connected` can fire
+	 * before `ondatachannel`, and sending a ping without a DataChannel would
+	 * throw. When the gate opens, the next scheduled tick fires normally.
+	 */
+	canSend?: () => boolean;
 	intervalMs?: number;
 	timeoutMs?: number;
 };
@@ -24,6 +32,7 @@ const DEFAULT_TIMEOUT_MS = 4000;
 export class HeartbeatScheduler {
 	private readonly send: (message: Message) => void;
 	private readonly onTimeout: () => void;
+	private readonly canSend: () => boolean;
 	private readonly intervalMs: number;
 	private readonly timeoutMs: number;
 
@@ -34,6 +43,7 @@ export class HeartbeatScheduler {
 	constructor(options: HeartbeatSchedulerOptions) {
 		this.send = options.send;
 		this.onTimeout = options.onTimeout;
+		this.canSend = options.canSend ?? (() => true);
 		this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
 		this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	}
@@ -72,7 +82,9 @@ export class HeartbeatScheduler {
 
 	private tick(): void {
 		if (!this.running) return;
-		this.send(createPing(randomUUID()));
+		if (this.canSend()) {
+			this.send(createPing(randomUUID()));
+		}
 		this.scheduleTick();
 	}
 

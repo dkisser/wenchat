@@ -213,6 +213,7 @@ export class Session {
 
 		this.heartbeat = new HeartbeatScheduler({
 			send: (msg) => this.send(msg),
+			canSend: () => this.transport !== undefined,
 			onTimeout: () => this.failByHeartbeat(),
 		});
 	}
