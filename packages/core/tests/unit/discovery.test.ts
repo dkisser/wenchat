@@ -11,8 +11,11 @@ function createMockBonjour() {
 	return {
 		publish: (opts: Record<string, unknown>) => {
 			published.push(opts);
+			// Real `bonjour-service` returns the Service EventEmitter directly
+			// (no `{ service }` wrapper). The previous mock returned
+			// `{ service }`, which papered over a real bug — see the
+			// `regression: bonjour-service` test below.
 			const service = {
-				...opts,
 				stop: (cb: () => void) => cb(),
 				on: (event: "up" | "error", handler: (arg?: unknown) => void) => {
 					if (event === "up") {
@@ -20,7 +23,7 @@ function createMockBonjour() {
 					}
 				},
 			};
-			return { service };
+			return service;
 		},
 		find: (_opts: unknown) => {
 			return {
@@ -71,6 +74,20 @@ describe("DiscoveryService", () => {
 		expect(service.getPeers().length).toBe(0);
 		expect(updates.length).toBe(2);
 
+		await service.stop();
+	});
+
+	// Regression guard: `bonjour-service` v1.x returns the Service
+	// EventEmitter directly from `publish()`, not `{ service }`. Reading
+	// `published.service` would throw synchronously inside the start()
+	// Promise executor, which the CLI swallows with `.catch(() => {})`,
+	// leaving mDNS neither publishing nor browsing. Reproduce the real
+	// shape so a future mock regression surfaces here, not in the user's
+	// LAN.
+	it("regression: bonjour-service returns Service, not { service }", async () => {
+		const bonjour = createMockBonjour();
+		const service = new DiscoveryService(bonjour as never);
+		await expect(service.start("alice", 9004)).resolves.toBeUndefined();
 		await service.stop();
 	});
 });

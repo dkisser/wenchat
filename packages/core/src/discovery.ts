@@ -5,24 +5,26 @@ import Bonjour from "bonjour-service";
 const SERVICE_TYPE = "wenchat";
 const SERVICE_PROTOCOL = "tcp";
 
+type BonjourServiceLike = {
+	stop: (callback: () => void) => void;
+	on: (event: "up" | "error", handler: (arg?: unknown) => void) => void;
+};
+
+type BonjourBrowserLike = {
+	stop: () => void;
+	on: (event: "up" | "down", handler: (service: unknown) => void) => void;
+};
+
 type BonjourLike = {
-	publish: (opts: Record<string, unknown>) => {
-		service: {
-			stop: (cb: () => void) => void;
-			on: (event: "up" | "error", handler: (arg?: unknown) => void) => void;
-		};
-	};
-	find: (opts: Record<string, unknown>) => {
-		stop: () => void;
-		on: (event: "up" | "down", handler: (service: unknown) => void) => void;
-	};
+	publish: (opts: Record<string, unknown>) => BonjourServiceLike;
+	find: (opts: Record<string, unknown>) => BonjourBrowserLike;
 	destroy?: (cb?: () => void) => void;
 };
 
 export class DiscoveryService {
 	private bonjour: BonjourLike;
-	private service?: ReturnType<BonjourLike["publish"]>["service"];
-	private browser?: ReturnType<BonjourLike["find"]>;
+	private service?: BonjourServiceLike;
+	private browser?: BonjourBrowserLike;
 	private peers: Record<string, PeerInfo> = {};
 	private listeners: Set<(peers: PeerInfo[]) => void> = new Set();
 	private localId: string = randomUUID();
@@ -59,7 +61,7 @@ export class DiscoveryService {
 					signalingPort: String(signalingPort),
 				},
 			});
-			this.service = published.service;
+			this.service = published;
 
 			this.service.on("up", () => resolve());
 			this.service.on("error", (arg?: unknown) => reject(getErrorMessage(arg)));
