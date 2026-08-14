@@ -17,3 +17,5 @@ docs/superpowers/
 *.log
 .DS_Store
 .env
+#claude
+.claude/
