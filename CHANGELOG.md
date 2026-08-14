@@ -5,6 +5,33 @@ All notable changes to WenChat will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-08-14
+
+### Fixed
+
+- **macOS will no longer rewrite your Computer Name / `LocalHostName` after
+  wenchat runs.** wenchat itself never read `os.hostname()` to write, but
+  `bonjour-service@1.4.4` falls back to `os.hostname()` for the SRV record's
+  target when `publish({...})` omits `host`, and pairing that with a fresh
+  `localId` per launch meant every wenchat run looked like a new Bonjour
+  service to `mDNSResponder`. RFC 6762 §8.1 conflict resolution then
+  renamed the instance to `<nickname>-XXXX-XX-1`, `-2`, …, and the "Computer
+  Name Follows Hostname" toggle synced that chaos into `scutil --get
+  LocalHostName` — visible as `hostname` / `scutil --get ComputerName` /
+  System Settings → Sharing all changing with a `-N` suffix that did not
+  recover after wenchat exited. The `localId` is now persisted to
+  `~/.wenchat/local-id` so the Bonjour instance name stays stable across
+  runs, and `bonjour.publish({...})` now passes `host: signalingHost`
+  explicitly (LAN IPv4 or `127.0.0.1`) so the SRV target is an IP literal
+  rather than a hostname string.
+
+- **Unrecognized slash-prefixed input was eaten silently.** `/foo` would
+  produce "[system] unknown command: foo" but the actual text never
+  reached the peer, since the slash-routing branch ran before the
+  fallback send. Routing now recognizes a slash-prefixed string as a
+  command only when it matches a known handler; anything else is sent
+  verbatim so `/shrug` round-trips intact.
+
 ## [0.1.2] - 2026-08-14
 
 ### Fixed
