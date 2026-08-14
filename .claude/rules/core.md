@@ -23,3 +23,28 @@ If you change bind logic, also re-run `bun scripts/smoke-lan-bind.ts` and verify
 ## WebRTC with werift
 
 `werift` is a pure-JS WebRTC implementation. DataChannel traffic is plaintext over `DataChannel` — DTLS provides in-transit integrity but there is no app-layer encryption. If adding crypto, do it in `@wenchat/protocol` or above, not in this package.
+
+## Test gotchas — bun:test handler ordering
+
+`bun:test` installs its own `uncaughtException` handler **during runner bootstrap, before any test code runs**. Consequence: `process.on('uncaughtException', …)` and even `process.prependListener('uncaughtException', …)` both attach AFTER bun:test's handler, so the test runner's handler always fires first and converts EventEmitter `'error'` events into test failures before user code can suppress them.
+
+`process.setUncaughtExceptionCaptureCallback` looks like the official knob but bun-types does not declare it; behaviour is undefined under bun:test.
+
+The only reliable lever is **prototype monkey-patching the emitter that raises `'error'`**. For `dgram.Socket` (used by werift's STUN socket), patch `dgram.Socket.prototype.emit` to short-circuit the `error` event when `err.code === 'ECONNREFUSED'` / `'EHOSTUNREACH'` — return `false` as if no listener were attached, so the EventEmitter default (throw as uncaughtException) never fires. macOS silently drops the ICMP for closed UDP ports, so this is Linux-only in practice.
+
+The reusable helper lives at `packages/core/tests/helpers/udpSuppression.ts`. Import and call inside an affected test, `restore()` in `finally`:
+
+```ts
+import { suppressUdpRefused } from "../helpers/udpSuppression";
+// …
+const restore = suppressUdpRefused();
+try {
+	// … werift / UDP / STUN code …
+} finally {
+	restore();
+}
+```
+
+The helper is idempotent (guarded by `Symbol.for('wenchat.peer-test.udp-suppressed')`) so nested calls are safe.
+
+If a future test needs to suppress a different error family on a different emitter, copy the pattern — do not try `process.on('uncaughtException', …)` again; the trap is identical.
