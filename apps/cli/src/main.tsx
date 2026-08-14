@@ -2,10 +2,15 @@
 // Note: `displayName` (the first positional arg) is purely an application-layer
 // peer nickname that is broadcast via mDNS TXT records. It is NOT a system
 // hostname and will not modify /etc/hostname, scutil settings, or any OS-level
-// name. If your shell or System Settings shows a "name changed" warning after
-// running wenchat, that is almost certainly macOS mDNSResponder reflecting the
-// Bonjour service instance name back into Sharing/Network views — not a real
-// hostname mutation caused by this code.
+// name. If you do see a "name changed" warning or your `scutil --get
+// LocalHostName` is being rewritten with a suffix like `-1`, `-2`, … that is
+// macOS `mDNSResponder` doing RFC 6762 §8.1 conflict resolution combined with
+// the "Computer Name Follows Hostname" system setting. The Bonjour instance
+// name we publish is `<displayName>-<6-hex of localId>`, and the localId is
+// persisted to `~/.wenchat/local-id` (see `packages/core/src/discovery.ts`) so
+// it stays stable across CLI runs. As long as you keep using the same nickname
+// and the localId file is intact, the instance name stays stable and
+// mDNSResponder has nothing to rename.
 import { getLanHost } from "@wenchat/core";
 import { render } from "ink";
 import { App } from "./App";

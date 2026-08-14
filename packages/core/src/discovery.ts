@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { PeerInfo } from "@wenchat/protocol";
 import Bonjour from "bonjour-service";
 
 const SERVICE_TYPE = "wenchat";
 const SERVICE_PROTOCOL = "tcp";
+
+const DEFAULT_LOCAL_ID_PATH = join(homedir(), ".wenchat", "local-id");
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type BonjourServiceLike = {
 	stop: (callback: () => void) => void;
@@ -21,21 +27,38 @@ type BonjourLike = {
 	destroy?: (cb?: () => void) => void;
 };
 
+export type DiscoveryServiceOptions = {
+	/**
+	 * Override the local mDNS peer ID. When provided, `localIdPath` is ignored
+	 * and the file system is never touched. Mainly for tests and for any
+	 * future caller that already knows its ID.
+	 */
+	localId?: string;
+	/**
+	 * Where to persist the auto-generated local ID. Defaults to
+	 * `~/.wenchat/local-id`. Passing a temp path is the recommended way to
+	 * isolate tests from the user's real wenchat directory.
+	 */
+	localIdPath?: string;
+};
+
 export class DiscoveryService {
 	private bonjour: BonjourLike;
 	private service?: BonjourServiceLike;
 	private browser?: BonjourBrowserLike;
 	private peers: Record<string, PeerInfo> = {};
 	private listeners: Set<(peers: PeerInfo[]) => void> = new Set();
-	private localId: string = randomUUID();
+	private localId: string;
 
-	constructor(bonjour?: BonjourLike) {
+	constructor(bonjour?: BonjourLike, options: DiscoveryServiceOptions = {}) {
 		this.bonjour =
 			bonjour ??
 			(new Bonjour(undefined, (err: unknown) => {
 				const message = getErrorMessage(err);
 				process.stderr.write(`[discovery] mDNS error: ${message}\n`);
 			}) as unknown as BonjourLike);
+		this.localId =
+			options.localId ?? loadOrCreateLocalId(options.localIdPath ?? DEFAULT_LOCAL_ID_PATH);
 	}
 
 	async start(
@@ -44,13 +67,23 @@ export class DiscoveryService {
 		signalingHost = "127.0.0.1",
 	): Promise<void> {
 		return new Promise((resolve, reject) => {
-			// The `name` below is a Bonjour/mDNS service instance name. It is
-			// published over multicast DNS (224.0.0.251) only for the lifetime of
-			// this process and has no relationship to the system hostname. macOS
-			// may display it in Finder → Network or System Settings → Sharing,
-			// which is purely cosmetic and not a real hostname mutation.
+			// The `name` below is a Bonjour/mDNS service instance name,
+			// published over multicast DNS (224.0.0.251) only for the lifetime
+			// of this process. We pair it with a stable `localId` (see
+			// `loadOrCreateLocalId`) so subsequent CLI runs register the same
+			// instance name — otherwise macOS mDNSResponder would resolve the
+			// conflict (RFC 6762 §8.1) by appending `-1`, `-2`, … and the
+			// "Computer Name Follows Hostname" toggle would sync that chaos
+			// into `scutil --get LocalHostName`.
+			//
+			// We additionally pass `host: signalingHost` so the SRV record's
+			// target is an IP literal — belt-and-suspenders against the same
+			// mDNSResponder feature ever deciding to sync hostname-strings
+			// instead. We never read `os.hostname()` for this purpose; the
+			// value here is either a LAN IPv4 or `127.0.0.1`.
 			const published = this.bonjour.publish({
 				name: `${displayName}-${this.localId.slice(0, 6)}`,
+				host: signalingHost,
 				type: SERVICE_TYPE,
 				protocol: SERVICE_PROTOCOL,
 				port: signalingPort,
@@ -146,4 +179,38 @@ function getErrorMessage(error: unknown): string {
 		return error.message;
 	}
 	return "Unexpected error";
+}
+
+/**
+ * Resolve a stable local peer ID. Reads it from `path` if it exists and is a
+ * valid UUID; otherwise generates a fresh UUID, persists it to `path`, and
+ * returns it. Persistence failures (permission denied, full disk) are
+ * tolerated by returning the freshly generated ID anyway — the current
+ * process still works, only the next launch will conflict again.
+ *
+ * `localId` exists so that the Bonjour instance name `<displayName>-<6-hex>`
+ * stays stable across CLI runs. Without this, every launch looks like a new
+ * Bonjour service to macOS mDNSResponder, which then resolves the conflict
+ * by appending `-1`, `-2`, … and (with "Computer Name Follows Hostname"
+ * enabled) syncs the result into `scutil --get LocalHostName`.
+ */
+function loadOrCreateLocalId(path: string): string {
+	let existing: string | undefined;
+	try {
+		existing = readFileSync(path, "utf-8").trim();
+	} catch {
+		// File missing or unreadable — fall through to generate a fresh ID.
+	}
+	if (existing && UUID_PATTERN.test(existing)) {
+		return existing;
+	}
+
+	const fresh = randomUUID();
+	try {
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, fresh, { mode: 0o600 });
+	} catch {
+		// Persistence is best-effort. The current run still needs an ID.
+	}
+	return fresh;
 }
