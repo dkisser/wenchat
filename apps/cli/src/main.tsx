@@ -15,6 +15,7 @@ import { getLanHost } from "@wenchat/core";
 import { render } from "ink";
 import { App } from "./App";
 import { enterAltScreen, exitAltScreen } from "./altScreen";
+import { resolveDisplayName } from "./displayName";
 import { enterMouseMode, exitMouseMode } from "./mouseMode";
 import { installTerminalSafetyNet } from "./terminalSafetyNet";
 import { HELP_TEXT, getCurrentVersion, upgradeCli } from "./updater";
@@ -58,7 +59,7 @@ for (const arg of rawArgs) {
 }
 const mouseEnabled = !flags.has("--no-mouse");
 
-const displayName = positional[0] || `user-${Math.floor(Math.random() * 10000)}`;
+const displayName = resolveDisplayName(positional);
 const signalingPort = Number(positional[1]) || 0;
 // arg[2] is the bind host. Given explicitly (e.g. on a multi-homed host) it
 // wins outright and the app boots straight into the peer list, exactly as
