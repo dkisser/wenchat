@@ -329,3 +329,94 @@ describe("InputBox Enter dispatch", () => {
 		expect(commands).toEqual([]);
 	});
 });
+
+describe("InputBox completion arbitration", () => {
+	const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+	const CR = "\r";
+
+	type CompletionCalls = {
+		readonly moves: string[];
+		readonly accepted: number[];
+		readonly dismissed: number[];
+	};
+
+	function mountWithCompletion(active: boolean): {
+		readonly calls: CompletionCalls;
+		readonly submits: string[];
+		readonly changes: string[];
+		readonly stdin: { write: (data: string) => void };
+	} {
+		const calls: CompletionCalls = { moves: [], accepted: [], dismissed: [] };
+		const submits: string[] = [];
+		const changes: string[] = [];
+		const { stdin } = render(
+			<InputBox
+				value="/file no"
+				onChange={(next) => changes.push(next)}
+				onSubmit={(text) => submits.push(text)}
+				onCommand={() => {}}
+				completion={{
+					active,
+					moveUp: () => calls.moves.push("up"),
+					moveDown: () => calls.moves.push("down"),
+					accept: () => calls.accepted.push(1),
+					dismiss: () => calls.dismissed.push(1),
+				}}
+			/>,
+		);
+		return { calls, submits, changes, stdin };
+	}
+
+	it("routes arrows, Enter and Esc to an active completion", async () => {
+		const { calls, submits, stdin } = mountWithCompletion(true);
+		await tick();
+
+		stdin.write(`${ESC}[A`); // Up
+		stdin.write(`${ESC}[B`); // Down
+		stdin.write(CR);
+		stdin.write(ESC);
+		await tick();
+
+		expect(calls.moves).toEqual(["up", "down"]);
+		expect(calls.accepted).toEqual([1]);
+		expect(calls.dismissed).toEqual([1]);
+		// Enter went to the picker, not to submit.
+		expect(submits).toEqual([]);
+	});
+
+	it("lets typing fall through while the completion is active", async () => {
+		const { calls, changes, stdin } = mountWithCompletion(true);
+		await tick();
+
+		stdin.write("x");
+		await tick();
+
+		expect(changes).toEqual(["/file nox"]);
+		expect(calls.moves).toEqual([]);
+	});
+
+	it("leaves Shift+Arrow to the chat viewport even when active", async () => {
+		const { calls, stdin } = mountWithCompletion(true);
+		await tick();
+
+		stdin.write(`${ESC}[1;2A`);
+		stdin.write(`${ESC}[1;2B`);
+		await tick();
+
+		expect(calls.moves).toEqual([]);
+	});
+
+	it("keeps normal Enter dispatch when the completion is inactive", async () => {
+		const { calls, submits, stdin } = mountWithCompletion(false);
+		await tick();
+
+		stdin.write(CR);
+		await tick();
+
+		expect(calls.accepted).toEqual([]);
+		// `/file no` is a known command, so it dispatches via onCommand — the
+		// point is the picker's accept was NOT called and the input went
+		// through the normal path.
+		expect(submits).toEqual([]);
+	});
+});

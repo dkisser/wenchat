@@ -13,6 +13,12 @@ export type ChatLayoutInput = {
 	readonly columns: number;
 	readonly suggestionVisible: boolean;
 	/**
+	 * True when the `/file` completion picker is on screen. Mutually
+	 * exclusive with `suggestionVisible` (the picker wins) — the caller
+	 * enforces that; this module only does the row accounting.
+	 */
+	readonly fileSuggestionVisible?: boolean;
+	/**
 	 * True when the masthead `Header` (logo + info) replaces the single-line
 	 * StatusBar as the top chrome. Defaults to false so existing callers and
 	 * the HostPicker phase keep the one-row status strip.
@@ -48,6 +54,8 @@ export const CHROME_ROWS = {
 	header: 4,
 	inputBox: 3,
 	commandSuggestion: 3,
+	/** Up to 4 candidates plus two border rows. */
+	fileSuggestion: 6,
 	chatGutter: 1,
 	topMargin: 1,
 } as const;
@@ -65,6 +73,7 @@ export function computeChatLayout({
 	rows,
 	columns,
 	suggestionVisible,
+	fileSuggestionVisible = false,
 	logoHeader = false,
 }: ChatLayoutInput): ChatLayout {
 	// `rows - 1`: log-update writes the frame plus a trailing newline, so an
@@ -77,7 +86,8 @@ export function computeChatLayout({
 		CHROME_ROWS.topMargin +
 		(logoHeader ? CHROME_ROWS.header : CHROME_ROWS.statusBar) +
 		CHROME_ROWS.inputBox +
-		(suggestionVisible ? CHROME_ROWS.commandSuggestion : 0);
+		(suggestionVisible ? CHROME_ROWS.commandSuggestion : 0) +
+		(fileSuggestionVisible ? CHROME_ROWS.fileSuggestion : 0);
 
 	const available = frameHeight - chrome;
 	const chatOuterHeight = Math.max(available, MIN_CHAT_OUTER_HEIGHT);

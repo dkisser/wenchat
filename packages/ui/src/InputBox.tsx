@@ -4,6 +4,20 @@ import { HistoryStore } from "./historyStore";
 import { isKnownCommand, matchCommands, parseCommand, splitCommand } from "./magicCommands";
 import { stripMouseReports } from "./mouseEvents";
 
+/**
+ * Key-routing surface for an attached inline picker (currently the `/file`
+ * fuzzy completion). While `active`, the picker claims unmodified ↑/↓,
+ * Enter and Esc before any of the input's own handling; every other key
+ * falls through so typing keeps filtering live.
+ */
+export type InputCompletion = {
+	readonly active: boolean;
+	moveUp(): void;
+	moveDown(): void;
+	accept(): void;
+	dismiss(): void;
+};
+
 export type InputBoxProps = {
 	value: string;
 	onChange: (next: string) => void;
@@ -15,6 +29,7 @@ export type InputBoxProps = {
 	 * which injects an arbitrary-height string into the fixed-height frame.
 	 */
 	onError?: (error: unknown) => void;
+	completion?: InputCompletion;
 };
 
 /**
@@ -49,10 +64,22 @@ const INPUT_BORDER = {
  *   from `~/.wechat/.wechat_history` on mount and writes back atomically
  *   after each submit.
  */
-export function InputBox({ value, onChange, onSubmit, onCommand, onError }: InputBoxProps) {
+export function InputBox({
+	value,
+	onChange,
+	onSubmit,
+	onCommand,
+	onError,
+	completion,
+}: InputBoxProps) {
 	const onChangeRef = useRef(onChange);
 	useEffect(() => {
 		onChangeRef.current = onChange;
+	});
+
+	const completionRef = useRef(completion);
+	useEffect(() => {
+		completionRef.current = completion;
 	});
 
 	const onErrorRef = useRef(onError);
@@ -83,6 +110,30 @@ export function InputBox({ value, onChange, onSubmit, onCommand, onError }: Inpu
 	useInput((input, key) => {
 		const history = historyRef.current;
 		if (!history) return;
+
+		// An active completion picker gets first claim on navigation keys —
+		// ↑/↓ move its selection instead of recalling history, Enter accepts
+		// the candidate instead of submitting, Esc closes it. Typing and
+		// Shift+Arrow (chat scrolling) fall through untouched.
+		const active = completionRef.current;
+		if (active?.active) {
+			if (key.upArrow && !key.shift) {
+				active.moveUp();
+				return;
+			}
+			if (key.downArrow && !key.shift) {
+				active.moveDown();
+				return;
+			}
+			if (key.return) {
+				active.accept();
+				return;
+			}
+			if (key.escape) {
+				active.dismiss();
+				return;
+			}
+		}
 
 		// Shift+Arrow is reserved for scrolling the chat viewport, so history
 		// recall only claims the unmodified arrows.

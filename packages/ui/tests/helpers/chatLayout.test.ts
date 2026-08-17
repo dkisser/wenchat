@@ -28,6 +28,22 @@ describe("computeChatLayout", () => {
 		expect(withRow.frameHeight).toBe(without.frameHeight);
 	});
 
+	it("reserves six rows for the file picker (4 candidates + border)", () => {
+		const without = computeChatLayout({
+			rows: 24,
+			columns: 80,
+			suggestionVisible: false,
+		});
+		const withPicker = computeChatLayout({
+			rows: 24,
+			columns: 80,
+			suggestionVisible: false,
+			fileSuggestionVisible: true,
+		});
+		expect(without.chatOuterHeight - withPicker.chatOuterHeight).toBe(CHROME_ROWS.fileSuggestion);
+		expect(withPicker.frameHeight).toBe(without.frameHeight);
+	});
+
 	it("trades three viewport rows for the logo header when it replaces the StatusBar", () => {
 		const bar = computeChatLayout({ rows: 24, columns: 80, suggestionVisible: false });
 		const logo = computeChatLayout({
