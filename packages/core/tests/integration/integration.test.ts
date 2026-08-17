@@ -2,6 +2,20 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { TextMessage } from "@wenchat/protocol";
 import { DiscoveryService } from "../../src/discovery";
 import { PeerConnection } from "../../src/peer";
+import { suppressUdpRefused } from "../helpers/udpSuppression";
+
+// Linux CI turns ICMP port-unreachable into ECONNREFUSED on werift's dgram
+// sockets after a test force-closes a pc, and bun:test's uncaughtException
+// handler fails whatever test is running when the error lands — including
+// unrelated ones. File-scope so the stray error is covered no matter which
+// test it leaks into. See tests/helpers/udpSuppression.ts.
+let restoreUdpSuppression: () => void = () => {};
+beforeEach(() => {
+	restoreUdpSuppression = suppressUdpRefused();
+});
+afterEach(() => {
+	restoreUdpSuppression();
+});
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
