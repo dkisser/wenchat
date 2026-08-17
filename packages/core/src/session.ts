@@ -1,6 +1,12 @@
 import type { Message } from "@wenchat/protocol";
 import { type RTCDataChannel, RTCIceCandidate, RTCPeerConnection } from "werift";
+import {
+	type SendFileOptions,
+	type SendFileResult,
+	sendFile as streamFileToPeer,
+} from "./fileTransfer";
 import { HeartbeatScheduler } from "./heartbeat";
+import { getLogger } from "./logger";
 import type { IceCandidatePayload, SdpPayload, SignalingServer } from "./signaling";
 import { DataTransport } from "./transport";
 
@@ -131,6 +137,18 @@ export class Session {
 		this.transport.send(message);
 	}
 
+	/**
+	 * Stream a file to the connected peer (chunked, backpressured,
+	 * sha256-verified). See `fileTransfer.ts` for the wire flow. Throws
+	 * "Data channel not ready" when no transport is attached.
+	 */
+	async sendFile(path: string, options?: SendFileOptions): Promise<SendFileResult> {
+		if (!this.transport) {
+			throw new Error("Data channel not ready");
+		}
+		return streamFileToPeer(this.transport, path, options);
+	}
+
 	onMessage(callback: (message: Message) => void): () => void {
 		this.messageListeners.add(callback);
 		return () => {
@@ -163,6 +181,15 @@ export class Session {
 	 */
 	_forceClosePc(): void {
 		this.pc.close();
+	}
+
+	/**
+	 * Test-only escape hatch: close just the data channel, simulating a
+	 * transfer failure that kills the channel while the pc itself stays
+	 * up — the "phantom online" scenario.
+	 */
+	_forceCloseDataChannel(): void {
+		this.transport?.close();
 	}
 
 	/**
@@ -231,6 +258,18 @@ export class Session {
 				listener(message);
 			}
 		});
+		// A channel that dies WITHOUT the pc following (e.g. a failed file
+		// transfer tearing down only the stream) used to leave both sides
+		// "online" forever: the heartbeat kept running on the dead channel's
+		// sibling state and the UI guard then refused any reconnect. Propagate
+		// the close as a terminal state — the `terminated` guard dedupes this
+		// against pc-level closes and heartbeat timeouts, and a local
+		// disconnect never reaches listeners because PeerConnection detaches
+		// its forwarders before closing the session.
+		this.transport.onClose(() => {
+			getLogger().warn("data channel closed");
+			this.notifyStateChange("closed");
+		});
 	}
 
 	private async flushPendingCandidates(): Promise<void> {
@@ -254,6 +293,13 @@ export class Session {
 			}
 			this.terminated = true;
 			this.stopHeartbeat();
+			// werift does NOT mark data channels closed when the pc dies —
+			// without this a sender blocked in `waitForDrain` would hang
+			// forever on a channel whose readyState never changes.
+			this.transport?.close();
+			getLogger().info({ state }, "connection terminated");
+		} else {
+			getLogger().info({ state }, "connection state");
 		}
 		for (const listener of this.stateListeners) {
 			listener(state);
@@ -268,6 +314,11 @@ export class Session {
 		if (this.terminated) return;
 		this.terminated = true;
 		this.stopHeartbeat();
+		getLogger().warn("heartbeat timed out — peer is unreachable");
+		// Close the channel explicitly: pc.close() alone leaves the
+		// DataChannel "open" in werift, and any in-flight `sendFile`
+		// would never observe the death.
+		this.transport?.close();
 		try {
 			this.pc.close();
 		} catch {

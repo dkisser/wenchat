@@ -14,10 +14,14 @@ export type FileStartMessage = {
 		fileName: string;
 		fileSize: number;
 		chunkSize: number;
-		checksum: string;
 	};
 };
 
+/**
+ * In-process representation of one file chunk. On the wire chunks travel as
+ * binary frames (see `frame.ts`), never as JSON — the transport synthesizes
+ * this message from a decoded frame so listeners keep a uniform shape.
+ */
 export type FileChunkMessage = {
 	type: "file-chunk";
 	id: string;
@@ -33,7 +37,22 @@ export type FileEndMessage = {
 	type: "file-end";
 	id: string;
 	timestamp: number;
-	payload: { transferId: string };
+	payload: {
+		transferId: string;
+		/** sha256 hex of the full file, computed incrementally by the sender. */
+		checksum: string;
+	};
+};
+
+/** Sent by either side when a transfer dies mid-flight so the peer can clean up. */
+export type FileAbortMessage = {
+	type: "file-abort";
+	id: string;
+	timestamp: number;
+	payload: {
+		transferId: string;
+		reason: string;
+	};
 };
 
 // Heartbeat ping — sent on a fixed cadence by each connected peer.
@@ -58,6 +77,7 @@ export type Message =
 	| FileStartMessage
 	| FileChunkMessage
 	| FileEndMessage
+	| FileAbortMessage
 	| PingMessage
 	| PongMessage;
 

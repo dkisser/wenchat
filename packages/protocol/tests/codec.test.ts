@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { decode, encode } from "../src/codec";
+import { createFileAbort, createFileEnd, createFileStart } from "../src/file";
 import type { PingMessage, PongMessage, TextMessage } from "../src/message";
 
 describe("codec", () => {
@@ -37,6 +38,29 @@ describe("codec", () => {
 		const encoded = encode(original);
 		const decoded = decode(encoded) as PongMessage;
 		expect(decoded).toEqual(original);
+	});
+
+	it("round-trips the file control messages", () => {
+		const start = createFileStart("a.bin", 100, 64 * 1024, "tid");
+		expect(decode(encode(start))).toEqual(start);
+
+		const end = createFileEnd("tid", "sha256hex");
+		expect(decode(encode(end))).toEqual(end);
+
+		const abort = createFileAbort("tid", "boom");
+		expect(decode(encode(abort))).toEqual(abort);
+	});
+
+	it("rejects a JSON file-chunk — chunks travel as binary frames", () => {
+		const legacy = new TextEncoder().encode(
+			JSON.stringify({
+				type: "file-chunk",
+				id: "x",
+				timestamp: 1,
+				payload: { transferId: "t", index: 0, data: [1, 2, 3] },
+			}),
+		);
+		expect(() => decode(legacy)).toThrow("Unknown message type");
 	});
 
 	it("throws on invalid json", () => {

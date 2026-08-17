@@ -1,4 +1,5 @@
 import type { Message } from "@wenchat/protocol";
+import type { SendFileOptions, SendFileResult } from "./fileTransfer";
 import { Session } from "./session";
 import { type IceCandidatePayload, type SdpPayload, SignalingServer } from "./signaling";
 
@@ -134,6 +135,17 @@ export class PeerConnection {
 		this.session.send(message);
 	}
 
+	/**
+	 * Stream a file to the connected peer. Throws "Data channel not ready"
+	 * when no session is active. See `fileTransfer.ts` for the wire flow.
+	 */
+	async sendFile(path: string, options?: SendFileOptions): Promise<SendFileResult> {
+		if (!this.session) {
+			throw new Error("Data channel not ready");
+		}
+		return this.session.sendFile(path, options);
+	}
+
 	onMessage(callback: (message: Message) => void): () => void {
 		this.messageListeners.add(callback);
 		return () => {
@@ -201,6 +213,14 @@ export class PeerConnection {
 	 */
 	_forceCloseActivePc(): void {
 		this.session?._forceClosePc();
+	}
+
+	/**
+	 * Test-only escape hatch: close just the active data channel,
+	 * simulating a failure that kills the channel while the pc stays up.
+	 */
+	_forceCloseActiveChannel(): void {
+		this.session?._forceCloseDataChannel();
 	}
 
 	private swapSession(newSession: Session): void {

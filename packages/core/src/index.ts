@@ -1,4 +1,5 @@
 export * from "./discovery";
+export * from "./fileTransfer";
 export * from "./logger";
 export * from "./network";
 export * from "./peer";

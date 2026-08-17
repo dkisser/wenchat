@@ -1,29 +1,32 @@
 import { describe, expect, it } from "bun:test";
-import { computeChecksum, createFileChunks, createFileStart, reassembleFile } from "../src/file";
+import { createFileAbort, createFileEnd, createFileStart } from "../src/file";
 
-describe("file transfer", () => {
-	it("splits file into chunks", () => {
-		const file = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-		const start = createFileStart("test.bin", file, 3);
-		const chunks = createFileChunks(file, 3);
-
-		expect(start.payload.fileName).toBe("test.bin");
-		expect(start.payload.fileSize).toBe(10);
-		expect(chunks.length).toBe(4);
-		expect(chunks[0].payload.index).toBe(0);
-		expect(chunks[3].payload.data.length).toBe(1);
+describe("file transfer messages", () => {
+	it("createFileStart carries name, size, chunk size and transfer id", () => {
+		const start = createFileStart("test.bin", 10, 3, "tid-1");
+		expect(start.type).toBe("file-start");
+		expect(start.payload).toEqual({
+			transferId: "tid-1",
+			fileName: "test.bin",
+			fileSize: 10,
+			chunkSize: 3,
+		});
 	});
 
-	it("reassembles chunks in order", () => {
-		const file = new Uint8Array([1, 2, 3, 4, 5]);
-		const chunks = createFileChunks(file, 2);
-		const restored = reassembleFile(chunks);
-		expect(restored).toEqual(file);
+	it("createFileStart generates a transfer id when omitted", () => {
+		const start = createFileStart("test.bin", 0, 3);
+		expect(start.payload.transferId.length).toBeGreaterThan(0);
 	});
 
-	it("computes consistent checksum", () => {
-		const a = new Uint8Array([1, 2, 3]);
-		const b = new Uint8Array([1, 2, 3]);
-		expect(computeChecksum(a)).toBe(computeChecksum(b));
+	it("createFileEnd carries the sha256 checksum", () => {
+		const end = createFileEnd("tid-1", "deadbeef");
+		expect(end.type).toBe("file-end");
+		expect(end.payload).toEqual({ transferId: "tid-1", checksum: "deadbeef" });
+	});
+
+	it("createFileAbort carries the reason", () => {
+		const abort = createFileAbort("tid-1", "disk full");
+		expect(abort.type).toBe("file-abort");
+		expect(abort.payload).toEqual({ transferId: "tid-1", reason: "disk full" });
 	});
 });

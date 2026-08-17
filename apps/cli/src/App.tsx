@@ -1,26 +1,23 @@
 import { randomUUID } from "node:crypto";
-import { access, readFile } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { basename } from "node:path";
 import {
 	type BindCandidate,
 	DiscoveryService,
+	FileReceiver,
 	PeerConnection,
+	type TransferEvent,
+	getLogFilePath,
+	getLogger,
 	listBindCandidates,
 	resolveAdvertiseHost,
 } from "@wenchat/core";
-import {
-	type Message,
-	type PeerInfo,
-	type TextMessage,
-	createFileChunks,
-	createFileStart,
-} from "@wenchat/protocol";
+import { type Message, type PeerInfo, type TextMessage, createFileAbort } from "@wenchat/protocol";
 import {
 	CHROME_ROWS,
 	ChatView,
 	CommandSuggestion,
-	DEFAULT_DOWNLOAD_DIR,
-	FileReceiver,
+	FileSuggestion,
 	Header,
 	HostPicker,
 	InputBox,
@@ -29,11 +26,13 @@ import {
 	StatusBar,
 	type StatusBarToast,
 	computeChatLayout,
+	expandTilde,
 	findMessageAtLine,
+	formatBytes,
 	isCommandSuggestionVisible,
-	saveCompletedTransfer,
 	useChatScroll,
 	useDoubleClick,
+	useFileCompletion,
 	useTerminalSize,
 } from "@wenchat/ui";
 import { Box, Text, useApp, useInput } from "ink";
@@ -93,7 +92,6 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 
 	const [discovery] = useState(() => new DiscoveryService());
 	const [peerConnection] = useState(() => new PeerConnection());
-	const fileReceiverRef = useRef(new FileReceiver());
 
 	// Monotonic counter incremented on every connect/disconnect. Each
 	// in-flight `connect()` captures its own generation and bails out
@@ -171,22 +169,15 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			setStatus("connecting");
 		});
 		const unsubscribeMessage = peerConnection.onMessage((message) => {
-			setMessages((prev) => appendCapped(prev, message));
-
-			if (message.type === "file-start") {
-				fileReceiverRef.current.onStart(message);
-			} else if (message.type === "file-chunk") {
-				const completed = fileReceiverRef.current.onChunk(message);
-				if (completed) {
-					void saveCompletedTransfer(DEFAULT_DOWNLOAD_DIR, completed)
-						.then((path) => {
-							appendSystemMessage(`Saved file: ${path}`);
-						})
-						.catch((err: unknown) => {
-							appendSystemMessage(`Failed to save file: ${getErrorMessage(err)}`);
-						});
-				}
+			if (message.type === "text") {
+				setMessages((prev) => appendCapped(prev, message));
+				return;
 			}
+			// File control messages never enter the chat log — a 100 MiB
+			// transfer would otherwise push thousands of chunk-carrying
+			// messages into React state and re-render on every one. They feed
+			// the streaming receiver, whose events surface as system entries.
+			fileReceiver.handleMessage(message);
 		});
 		const unsubscribeState = peerConnection.onStateChange((state) => {
 			const peer = selectedPeerRef.current;
@@ -219,6 +210,9 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 				// Drop the stale peer name so StatusBar doesn't keep showing
 				// "Offline • <oldPeer>" after the peer goes away.
 				setSelectedPeer(null);
+				// Any in-flight incoming transfer is now hopeless — clean up
+				// its temp file and emit a "failed" system entry per transfer.
+				void fileReceiver.dispose();
 			}
 		});
 
@@ -236,12 +230,14 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 				const realPort = peerConnection.getSignalingPort();
 				if (realPort > 0) setLocalEndpoint(`${advertiseHost}:${realPort}`);
 				await discovery.start(displayName, realPort, advertiseHost);
-			} catch {
-				// Signaling / discovery failures are swallowed at the CLI
-				// boundary, matching the original `.catch(() => {})` on
-				// both calls. If you ever want to surface them, attach a
-				// logger here — `process.stderr` writes would otherwise
-				// corrupt the alt-screen frame.
+			} catch (err) {
+				// Never write to stderr here — it would corrupt the alt-screen
+				// frame. The daily log file gets the full detail instead, and
+				// the user gets a system message pointing at it.
+				getLogger().error({ err }, "signaling/discovery startup failed");
+				appendSystemMessage(
+					`Failed to start on ${bindHost}:${signalingPort} — details in ${getLogFilePath()}`,
+				);
 			}
 		})();
 
@@ -251,7 +247,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			unsubscribeIncoming();
 			unsubscribeMessage();
 			unsubscribeState();
-			fileReceiverRef.current.clear();
+			void fileReceiver.dispose();
 			discovery.stop().catch(() => {});
 			peerConnection.close();
 		};
@@ -310,30 +306,33 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	}, []);
 
 	const handleFile = async (path: string) => {
+		const expanded = expandTilde(path);
 		try {
 			// Pre-flight check so missing files short-circuit before we touch
 			// the data channel. Any error thrown here means nothing has been
 			// sent to the peer yet — the receiver's ChatView stays untouched.
-			await access(path);
-			const file = await readFile(path);
-			const chunkSize = 16 * 1024;
-			const transferId = randomUUID();
+			await access(expanded);
 			// Send only the basename over the wire so the receiver never
 			// learns where the file lives on our disk.
-			const displayName = basename(path);
-			const start = createFileStart(displayName, file, chunkSize, transferId);
-			peerConnection.send(start);
-			const chunks = createFileChunks(file, chunkSize, transferId);
-			for (const chunk of chunks) {
-				peerConnection.send(chunk);
-			}
+			const displayName = basename(expanded);
+			appendSystemMessage(`Sending ${displayName}…`);
+			const result = await peerConnection.sendFile(expanded, {
+				onProgress: (sent, total) => {
+					if (total > 0) {
+						showTransferProgress(`Sending ${displayName} — ${Math.round((sent / total) * 100)}%`);
+					}
+				},
+			});
+			appendSystemMessage(`Sent file: ${displayName} (${formatBytes(result.bytesSent)})`);
 		} catch (err) {
 			if (isErrnoException(err) && err.code === "ENOENT") {
-				appendSystemMessage(`File doesn't exist: ${path}`);
+				appendSystemMessage(`File doesn't exist: ${expanded}`);
 			} else if (isErrnoException(err) && err.code === "EACCES") {
-				appendSystemMessage(`Cannot read file (permission denied): ${path}`);
+				appendSystemMessage(`Cannot read file (permission denied): ${expanded}`);
 			} else {
-				appendSystemMessage(`Failed to send file: ${getErrorMessage(err)}`);
+				appendSystemMessage(
+					`Failed to send file: ${getErrorMessage(err)} (logs: ${getLogFilePath()})`,
+				);
 			}
 		}
 	};
@@ -503,6 +502,10 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	};
 
 	const { rows, columns } = useTerminalSize();
+	// Inline fuzzy picker for `/file <partial>`. While it's active it owns
+	// ↑/↓/Enter/Esc (via the InputBox completion prop) and replaces the
+	// command suggestion row — stacking both would cost nine rows of chrome.
+	const fileCompletion = useFileCompletion({ input: inputText, onChange: setInputText });
 	// The logo masthead needs its 38 columns plus room for the info column;
 	// below the threshold the single-line StatusBar takes over so nothing
 	// meaningful gets truncated away.
@@ -510,7 +513,8 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	const layout = computeChatLayout({
 		rows,
 		columns,
-		suggestionVisible: isCommandSuggestionVisible(inputText),
+		suggestionVisible: !fileCompletion.active && isCommandSuggestionVisible(inputText),
+		fileSuggestionVisible: fileCompletion.active,
 		logoHeader: showLogoHeader,
 	});
 
@@ -554,6 +558,56 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
 		},
 		[],
+	);
+
+	// Transfer progress goes to the toast (throttled — chunk events can
+	// arrive far faster than frames), start/complete/fail go to the chat
+	// log as system entries.
+	const transferToastAtRef = useRef(0);
+	const showTransferProgress = useCallback(
+		(text: string) => {
+			const now = Date.now();
+			if (now - transferToastAtRef.current < 1000) return;
+			transferToastAtRef.current = now;
+			showToast(text);
+		},
+		[showToast],
+	);
+
+	const [fileReceiver] = useState(
+		() =>
+			new FileReceiver({
+				onEvent: (event: TransferEvent) => {
+					if (event.kind === "started") {
+						appendSystemMessage(`Receiving ${event.fileName} (${formatBytes(event.fileSize)})…`);
+						return;
+					}
+					if (event.kind === "progress") {
+						const pct =
+							event.totalBytes > 0 ? Math.round((event.receivedBytes / event.totalBytes) * 100) : 0;
+						showTransferProgress(`Receiving ${event.fileName} — ${pct}%`);
+						return;
+					}
+					if (event.kind === "completed") {
+						appendSystemMessage(`Saved file: ${event.path}`);
+						return;
+					}
+					// failed
+					appendSystemMessage(
+						`File transfer failed: ${event.fileName} — ${event.reason} (logs: ${getLogFilePath()})`,
+					);
+					// A locally-caused failure (checksum, disk, ordering) should
+					// stop the sender instead of letting it stream into the void.
+					// Best-effort: the connection may already be gone.
+					if (!event.reason.startsWith("aborted by peer")) {
+						try {
+							peerConnection.send(createFileAbort(event.transferId, event.reason));
+						} catch {
+							// channel closed — nothing to tell the peer
+						}
+					}
+				},
+			}),
 	);
 
 	const copyAndReport = useCallback(
@@ -682,7 +736,14 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 				/>
 			)}
 			<Box flexShrink={0}>
-				<CommandSuggestion partial={inputText} />
+				{fileCompletion.active ? (
+					<FileSuggestion
+						candidates={fileCompletion.candidates}
+						selectedIndex={fileCompletion.selectedIndex}
+					/>
+				) : (
+					<CommandSuggestion partial={inputText} />
+				)}
 			</Box>
 			<Box flexShrink={0}>
 				<InputBox
@@ -691,6 +752,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 					onSubmit={handleSend}
 					onCommand={handleCommand}
 					onError={(err) => appendSystemMessage(`History unavailable: ${getErrorMessage(err)}`)}
+					completion={fileCompletion}
 				/>
 			</Box>
 		</Box>

@@ -11,7 +11,7 @@ export * from "./commandHistory";
 export * from "./displayLines";
 export * from "./expandTilde";
 export * from "./fileCompletion";
-export * from "./fileReceiver";
+export * from "./formatBytes";
 export * from "./historyStore";
 export * from "./listWindow";
 export * from "./logo";

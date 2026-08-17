@@ -1,8 +1,13 @@
-import type { FileChunkMessage, FileStartMessage } from "./message";
+import type { FileAbortMessage, FileEndMessage, FileStartMessage } from "./message";
 
+/**
+ * Announce a new transfer. Carries no checksum — a streaming sender cannot
+ * know the sha256 before it has read the file; integrity is verified from
+ * `file-end` instead.
+ */
 export function createFileStart(
 	fileName: string,
-	file: Uint8Array,
+	fileSize: number,
 	chunkSize: number,
 	transferId: string = crypto.randomUUID(),
 ): FileStartMessage {
@@ -13,52 +18,28 @@ export function createFileStart(
 		payload: {
 			transferId,
 			fileName,
-			fileSize: file.length,
+			fileSize,
 			chunkSize,
-			checksum: computeChecksum(file),
 		},
 	};
 }
 
-export function createFileChunks(
-	file: Uint8Array,
-	chunkSize: number,
-	transferId: string = crypto.randomUUID(),
-): FileChunkMessage[] {
-	const chunks: FileChunkMessage[] = [];
-	for (let i = 0; i < file.length; i += chunkSize) {
-		const slice = file.slice(i, i + chunkSize);
-		chunks.push({
-			type: "file-chunk",
-			id: crypto.randomUUID(),
-			timestamp: Date.now(),
-			payload: {
-				transferId,
-				index: chunks.length,
-				data: slice,
-			},
-		});
-	}
-	return chunks;
+/** Declare a transfer complete. `checksum` is the sha256 hex of the whole file. */
+export function createFileEnd(transferId: string, checksum: string): FileEndMessage {
+	return {
+		type: "file-end",
+		id: crypto.randomUUID(),
+		timestamp: Date.now(),
+		payload: { transferId, checksum },
+	};
 }
 
-export function reassembleFile(chunks: FileChunkMessage[]): Uint8Array {
-	const sorted = [...chunks].sort((a, b) => a.payload.index - b.payload.index);
-	const totalLength = sorted.reduce((sum, chunk) => sum + chunk.payload.data.length, 0);
-	const result = new Uint8Array(totalLength);
-	let offset = 0;
-	for (const chunk of sorted) {
-		result.set(chunk.payload.data, offset);
-		offset += chunk.payload.data.length;
-	}
-	return result;
-}
-
-export function computeChecksum(data: Uint8Array): string {
-	let hash = 0;
-	for (const byte of data) {
-		hash = (hash << 5) - hash + byte;
-		hash |= 0;
-	}
-	return hash.toString(16);
+/** Tell the peer a transfer died mid-flight so it can drop partial state. */
+export function createFileAbort(transferId: string, reason: string): FileAbortMessage {
+	return {
+		type: "file-abort",
+		id: crypto.randomUUID(),
+		timestamp: Date.now(),
+		payload: { transferId, reason },
+	};
 }

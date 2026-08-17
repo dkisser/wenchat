@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { computeChecksum, decode, encode } from "../src/index";
+import {
+	createFileStart,
+	decode,
+	decodeFileChunkFrame,
+	encode,
+	encodeFileChunkFrame,
+} from "../src/index";
 import type { TextMessage } from "../src/index";
 
 describe("index exports", () => {
@@ -11,6 +17,15 @@ describe("index exports", () => {
 			payload: { text: "hi" },
 		};
 		expect(decode(encode(msg))).toEqual(msg);
-		expect(typeof computeChecksum).toBe("function");
+		expect(typeof createFileStart).toBe("function");
+	});
+
+	it("exports the binary frame helpers", () => {
+		const frame = encodeFileChunkFrame(
+			"01234567-89ab-cdef-0123-456789abcdef",
+			0,
+			new Uint8Array([1]),
+		);
+		expect(decodeFileChunkFrame(frame).index).toBe(0);
 	});
 });
