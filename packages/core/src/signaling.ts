@@ -15,6 +15,21 @@ export type IceCandidatePayload = {
 	sdpMLineIndex?: number;
 };
 
+/**
+ * Hard cap on a signaling request body. SDP offers/answers and ICE
+ * candidates are a few KiB at most; 256 KiB leaves generous headroom while
+ * keeping a hostile LAN peer from buffering unbounded memory or hanging the
+ * process on an unread multi-GB body.
+ */
+export const MAX_BODY_BYTES = 256 * 1024;
+
+class BodyTooLargeError extends Error {
+	constructor() {
+		super(`request body exceeds ${MAX_BODY_BYTES} bytes`);
+		this.name = "BodyTooLargeError";
+	}
+}
+
 export class SignalingServer {
 	private server?: Server;
 	private offerCallback?: (offer: SdpPayload) => SdpPayload | Promise<SdpPayload>;
@@ -89,9 +104,18 @@ export class SignalingServer {
 
 	private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const url = req.url || "";
-		const body = await readBody(req);
 
 		try {
+			// readBody stays INSIDE the try: a peer that resets the socket
+			// mid-body rejects the read, and that rejection must be caught
+			// here — outside the try it becomes an unhandled rejection that
+			// the terminal safety net turns into process.exit(1).
+			const contentLength = Number(req.headers["content-length"] ?? 0);
+			if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+				throw new BodyTooLargeError();
+			}
+			const body = await readBody(req);
+
 			if (url === "/offer" && req.method === "POST") {
 				const offer = JSON.parse(body) as SdpPayload;
 				if (!this.offerCallback) {
@@ -113,8 +137,19 @@ export class SignalingServer {
 			}
 		} catch (err) {
 			getLogger().warn({ err: getErrorMessage(err), url }, "signaling request failed");
-			res.writeHead(400);
+			// On a socket reset the response is already gone — writing to it
+			// would throw a secondary error that masks the real one.
+			if (res.destroyed || res.writableEnded) {
+				return;
+			}
+			const tooLarge = err instanceof BodyTooLargeError;
+			res.writeHead(tooLarge ? 413 : 400, { "Content-Type": "application/json" });
 			res.end(JSON.stringify({ error: getErrorMessage(err) }));
+			if (tooLarge) {
+				// The rest of the oversized body may still be inbound; close the
+				// socket once the 413 is flushed so it can't pile up unread.
+				res.on("finish", () => req.socket.destroy());
+			}
 		}
 	}
 }
@@ -122,9 +157,33 @@ export class SignalingServer {
 function readBody(req: IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
-		req.on("data", (chunk) => chunks.push(chunk));
-		req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
-		req.on("error", reject);
+		let total = 0;
+		let settled = false;
+		const fail = (err: Error) => {
+			if (!settled) {
+				settled = true;
+				reject(err);
+			}
+		};
+		req.on("data", (chunk: Buffer) => {
+			if (settled) return; // already rejected; discard the rest
+			total += chunk.length;
+			if (total > MAX_BODY_BYTES) {
+				fail(new BodyTooLargeError());
+				return;
+			}
+			chunks.push(chunk);
+		});
+		req.on("end", () => {
+			if (!settled) {
+				settled = true;
+				resolve(Buffer.concat(chunks).toString("utf-8"));
+			}
+		});
+		req.on("error", fail);
+		// A reset socket emits "close" without "end"; don't leave the
+		// handler promise pending forever.
+		req.on("close", () => fail(new Error("connection closed before the body was fully read")));
 	});
 }
 

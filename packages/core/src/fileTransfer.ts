@@ -34,6 +34,13 @@ export const BUFFERED_AMOUNT_HIGH_WATER = 4 * 1024 * 1024;
 
 export const DEFAULT_DOWNLOAD_DIR = join(homedir(), "Downloads");
 
+/**
+ * Cap on simultaneously open inbound transfers. Each one holds a file
+ * handle, a temp file, and a Map entry — without a bound, a peer spraying
+ * file-start messages exhausts fds (EMFILE).
+ */
+export const MAX_CONCURRENT_TRANSFERS = 8;
+
 /** Emit a progress event at most once per this many received bytes. */
 const PROGRESS_GRANULARITY_BYTES = 256 * 1024;
 
@@ -92,7 +99,14 @@ export async function sendFile(
 		const buffer = new Uint8Array(FILE_CHUNK_SIZE);
 		while (position < fileStat.size) {
 			const { bytesRead } = await handle.read(buffer, 0, FILE_CHUNK_SIZE, position);
-			if (bytesRead === 0) break; // file shrank mid-read; send what we have
+			if (bytesRead === 0) {
+				// The file shrank after we announced its size. Sending file-end
+				// here would deliver a truncated file whose checksum "verifies"
+				// — fail loudly so the receiver drops the partial instead.
+				throw new Error(
+					`Source file changed size during send (read stopped at ${position} of ${fileStat.size} bytes)`,
+				);
+			}
 			const chunk = buffer.subarray(0, bytesRead);
 			hash.update(chunk);
 			channel.sendBinary(encodeFileChunkFrame(transferId, index, chunk));
@@ -225,6 +239,29 @@ export class FileReceiver {
 
 	private async startTransfer(message: FileStartMessage): Promise<void> {
 		const { transferId, fileName, fileSize } = message.payload;
+		if (!Number.isSafeInteger(fileSize) || fileSize < 0) {
+			getLogger().warn({ transferId, fileName, fileSize }, "invalid announced file size");
+			this.emit({ kind: "failed", transferId, fileName, reason: "invalid announced file size" });
+			return;
+		}
+		if (this.transfers.has(transferId)) {
+			// Reusing an id would silently overwrite the Map entry and leak the
+			// previous handle/temp file — fail the old one explicitly first.
+			await this.failTransfer(transferId, "duplicate transfer id");
+		}
+		if (this.transfers.size >= MAX_CONCURRENT_TRANSFERS) {
+			getLogger().warn(
+				{ transferId, fileName, active: this.transfers.size },
+				"too many concurrent transfers",
+			);
+			this.emit({
+				kind: "failed",
+				transferId,
+				fileName,
+				reason: `too many concurrent transfers (limit ${MAX_CONCURRENT_TRANSFERS})`,
+			});
+			return;
+		}
 		await mkdir(this.downloadDir, { recursive: true });
 		const finalPath = await uniqueDownloadPath(this.downloadDir, fileName);
 		const tempPath = `${finalPath}.part`;
@@ -260,6 +297,15 @@ export class FileReceiver {
 			);
 			return;
 		}
+		if (transfer.received + data.length > transfer.fileSize) {
+			// The announced size is the only bound on what lands on disk;
+			// without this check a peer can stream unlimited data.
+			await this.failTransfer(
+				transferId,
+				`received more data than the announced file size (${transfer.fileSize} bytes)`,
+			);
+			return;
+		}
 		await transfer.handle.write(data, 0, data.length, transfer.received);
 		transfer.hash.update(data);
 		transfer.received += data.length;
@@ -281,6 +327,15 @@ export class FileReceiver {
 		const transfer = this.transfers.get(transferId);
 		if (!transfer) {
 			getLogger().debug({ transferId }, "file-end for unknown transfer dropped");
+			return;
+		}
+		if (transfer.received !== transfer.fileSize) {
+			// The checksum alone can't catch a short transfer — the sender
+			// computes it over whatever it managed to read.
+			await this.failTransfer(
+				transferId,
+				`incomplete transfer (received ${transfer.received} of ${transfer.fileSize} bytes)`,
+			);
 			return;
 		}
 		const actual = transfer.hash.digest("hex");

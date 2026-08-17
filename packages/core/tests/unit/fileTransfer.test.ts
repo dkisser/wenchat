@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
+import { truncateSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,7 @@ import {
 	BUFFERED_AMOUNT_HIGH_WATER,
 	FILE_CHUNK_SIZE,
 	FileReceiver,
+	MAX_CONCURRENT_TRANSFERS,
 	type SendChannel,
 	type TransferEvent,
 	sendFile,
@@ -58,6 +60,24 @@ function chunkMessage(transferId: string, index: number, data: Uint8Array): File
 		id: `chunk-${index}`,
 		timestamp: 0,
 		payload: { transferId, index, data },
+	};
+}
+
+function startMessage(transferId: string, fileName: string, fileSize: number): Message {
+	return {
+		type: "file-start",
+		id: `start-${transferId}`,
+		timestamp: 0,
+		payload: { transferId, fileName, fileSize, chunkSize: FILE_CHUNK_SIZE },
+	};
+}
+
+function endMessage(transferId: string, checksum: string): Message {
+	return {
+		type: "file-end",
+		id: `end-${transferId}`,
+		timestamp: 0,
+		payload: { transferId, checksum },
 	};
 }
 
@@ -143,6 +163,23 @@ describe("sendFile", () => {
 		expect(channel.sent.map((m) => m.type)).toEqual(["file-start", "file-end"]);
 		expect(result.bytesSent).toBe(0);
 		expect(result.checksum).toBe(sha256Hex(new Uint8Array(0)));
+	});
+
+	it("aborts instead of reporting success when the source file shrinks mid-send", async () => {
+		const path = join(scratchDir, "shrinking.bin");
+		await writeFile(path, randomBytes(FILE_CHUNK_SIZE * 2));
+		const channel = makeFakeChannel();
+		// Shrink the file synchronously after the first frame goes out, so the
+		// next read hits EOF well before the announced size. Sending a file-end
+		// at that point would deliver a truncated file that "verifies".
+		channel.sendBinary = (frame: Uint8Array) => {
+			truncateSync(path, 5);
+			channel.frames.push(decodeFileChunkFrame(frame));
+		};
+
+		await expect(sendFile(channel as unknown as SendChannel, path)).rejects.toThrow("changed size");
+		expect(channel.sent.some((m) => m.type === "file-abort")).toBe(true);
+		expect(channel.sent.some((m) => m.type === "file-end")).toBe(false);
 	});
 });
 
@@ -342,6 +379,103 @@ describe("FileReceiver", () => {
 		receiver.handleMessage(chunkMessage(crypto.randomUUID(), 0, new Uint8Array([1])));
 		await receiver.dispose();
 		expect(events.length).toBe(0);
+	});
+
+	it("fails a transfer whose chunks exceed the announced file size", async () => {
+		const { events, sink } = collectEvents();
+		const receiver = new FileReceiver({ downloadDir: scratchDir, onEvent: sink });
+		const transferId = crypto.randomUUID();
+
+		receiver.handleMessage(startMessage(transferId, "over.bin", 3));
+		receiver.handleMessage(chunkMessage(transferId, 0, new Uint8Array([1, 2, 3, 4])));
+		await receiver.dispose();
+
+		const failed = events.find((e) => e.kind === "failed");
+		expect(failed?.kind).toBe("failed");
+		if (failed?.kind !== "failed") throw new Error("unreachable");
+		expect(failed.reason).toContain("announced file size");
+		const dir = await import("node:fs/promises").then((fs) => fs.readdir(scratchDir));
+		expect(dir).toEqual([]);
+	});
+
+	it("fails file-end when received bytes don't match the announced size", async () => {
+		const { events, sink } = collectEvents();
+		const receiver = new FileReceiver({ downloadDir: scratchDir, onEvent: sink });
+		const transferId = crypto.randomUUID();
+		const partial = new Uint8Array([1, 2, 3]);
+
+		receiver.handleMessage(startMessage(transferId, "short.bin", 6));
+		receiver.handleMessage(chunkMessage(transferId, 0, partial));
+		// The checksum covers exactly what arrived — without a byte-count check
+		// this truncated file would be renamed into place as a "success".
+		receiver.handleMessage(endMessage(transferId, sha256Hex(partial)));
+		await receiver.dispose();
+
+		const failed = events.find((e) => e.kind === "failed");
+		expect(failed?.kind).toBe("failed");
+		if (failed?.kind !== "failed") throw new Error("unreachable");
+		expect(failed.reason).toContain("incomplete");
+		expect(events.some((e) => e.kind === "completed")).toBe(false);
+		const dir = await import("node:fs/promises").then((fs) => fs.readdir(scratchDir));
+		expect(dir).toEqual([]);
+	});
+
+	it("rejects a new transfer once the concurrent limit is reached", async () => {
+		const { events, sink } = collectEvents();
+		const receiver = new FileReceiver({ downloadDir: scratchDir, onEvent: sink });
+
+		for (let i = 0; i < MAX_CONCURRENT_TRANSFERS; i++) {
+			receiver.handleMessage(startMessage(crypto.randomUUID(), `t${i}.bin`, 1));
+		}
+		receiver.handleMessage(startMessage(crypto.randomUUID(), "overflow.bin", 1));
+		await receiver.dispose();
+
+		expect(events.filter((e) => e.kind === "started").length).toBe(MAX_CONCURRENT_TRANSFERS);
+		const rejected = events.find((e) => e.kind === "failed" && e.fileName === "overflow.bin");
+		expect(rejected?.kind).toBe("failed");
+		if (rejected?.kind !== "failed") throw new Error("unreachable");
+		expect(rejected.reason).toContain("concurrent");
+	});
+
+	it("a duplicate transfer id fails and cleans up the previous transfer", async () => {
+		const { events, sink } = collectEvents();
+		const receiver = new FileReceiver({ downloadDir: scratchDir, onEvent: sink });
+		const transferId = crypto.randomUUID();
+		const content = new Uint8Array([9, 9, 9]);
+
+		receiver.handleMessage(startMessage(transferId, "first.bin", 100));
+		receiver.handleMessage(chunkMessage(transferId, 0, new Uint8Array([1])));
+		// Reusing the id must not leak the first transfer's handle/temp file.
+		receiver.handleMessage(startMessage(transferId, "second.bin", 3));
+		receiver.handleMessage(chunkMessage(transferId, 0, content));
+		receiver.handleMessage(endMessage(transferId, sha256Hex(content)));
+		await receiver.dispose();
+
+		const duplicate = events.find((e) => e.kind === "failed" && e.fileName === "first.bin");
+		expect(duplicate?.kind).toBe("failed");
+		if (duplicate?.kind !== "failed") throw new Error("unreachable");
+		expect(duplicate.reason).toContain("duplicate");
+		const completed = events.find((e) => e.kind === "completed");
+		expect(completed?.kind).toBe("completed");
+		if (completed?.kind !== "completed") throw new Error("unreachable");
+		expect(completed.fileName).toBe("second.bin");
+		const dir = await import("node:fs/promises").then((fs) => fs.readdir(scratchDir));
+		expect(dir).toEqual(["second.bin"]);
+	});
+
+	it("rejects a negative announced file size without touching disk", async () => {
+		const { events, sink } = collectEvents();
+		const receiver = new FileReceiver({ downloadDir: scratchDir, onEvent: sink });
+		const transferId = crypto.randomUUID();
+
+		receiver.handleMessage(startMessage(transferId, "neg.bin", -1));
+		await receiver.dispose();
+
+		const failed = events.find((e) => e.kind === "failed");
+		expect(failed?.kind).toBe("failed");
+		if (failed?.kind !== "failed") throw new Error("unreachable");
+		expect(failed.reason).toContain("invalid");
+		expect(events.some((e) => e.kind === "started")).toBe(false);
 	});
 });
 
