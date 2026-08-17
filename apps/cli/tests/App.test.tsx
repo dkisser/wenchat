@@ -17,16 +17,36 @@ describe("App", () => {
 		expect(instance.lastFrame()).toContain("Offline");
 	});
 
+	it("leaves the very first terminal row blank as a uniform top margin", () => {
+		// The figlet wordmark's sparse first line made the masthead look
+		// padded while status/toast text touched row 0 — the whole frame now
+		// starts with one blank row so every branch shares that whitespace.
+		instance = render(<App displayName="alice" signalingPort={19001} signalingHost="127.0.0.1" />);
+		const firstRow = (instance.lastFrame() ?? "").split("\n")[0] ?? "x";
+		expect(firstRow.trim()).toBe("");
+	});
+
+	it("renders the logo masthead with identity and copy hint on wide terminals", () => {
+		// ink-testing-library reports an 80-column terminal, which clears
+		// MIN_LOGO_HEADER_COLUMNS — the main screen gets the wordmark Header
+		// instead of the single-line StatusBar.
+		instance = render(<App displayName="alice" signalingPort={19001} signalingHost="127.0.0.1" />);
+		const frame = instance.lastFrame() ?? "";
+		expect(frame).toContain("_______"); // smslant wordmark fragment
+		expect(frame).toContain("You: alice");
+		expect(frame).toContain("Double-click to copy");
+	});
+
 	it("keeps the input box as the last visible row", () => {
 		// The reported bug: the input box scrolled off screen once the chat
 		// log outgrew the terminal. With a fixed frame height, the InputBox
-		// must always be the last frame row — its bottom border is the very
-		// last line.
+		// must always be the last frame row — its bottom rule is the very
+		// last line (the input box draws only horizontal rules, no verticals).
 		instance = render(<App displayName="alice" signalingPort={19001} signalingHost="127.0.0.1" />);
 		const frame = instance.lastFrame() ?? "";
 		const lastLine = frame.split("\n").at(-1) ?? "";
-		expect(lastLine.startsWith("└")).toBe(true);
-		expect(lastLine.endsWith("┘")).toBe(true);
+		expect(lastLine.startsWith("─")).toBe(true);
+		expect(lastLine.endsWith("─")).toBe(true);
 	});
 
 	it("renders ChatView (not PeerList) when initialMessages is non-empty even while offline", () => {

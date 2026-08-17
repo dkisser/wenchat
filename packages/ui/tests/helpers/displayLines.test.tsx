@@ -3,30 +3,54 @@ import type { Message } from "@wenchat/protocol";
 import { Box, Text } from "ink";
 import { render } from "ink-testing-library";
 import {
+	type ChatNames,
 	findMessageAtLine,
 	formatMessage,
+	formatTimestamp,
 	sliceViewport,
 	toDisplayLines,
 	wrapToWidth,
 } from "../../src/displayLines";
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping SGR escapes requires matching ESC
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+/** Local name "alice" (5 cols) vs fallback peer name "peer" (4) → nameWidth 5. */
+const NAMES: ChatNames = { local: "alice" };
+/** prefixWidth = 5 (HH:mm) + 2 + 5 (name column) + 2. */
+const PREFIX_WIDTH = 14;
 
 function text(id: string, body: string): Message {
 	return { type: "text", id, timestamp: 0, payload: { text: body } };
 }
 
 describe("formatMessage", () => {
-	it("prefixes own messages with [me]", () => {
-		expect(formatMessage(text("local-1", "hi"), "local")).toBe("[me] hi");
+	it("styles own messages with a dim timestamp and a cyan bold nickname", () => {
+		const out = formatMessage(text("local-1", "hi"), "local", NAMES);
+		expect(out.system).toBe(false);
+		expect(stripAnsi(out.prefix)).toBe(`${formatTimestamp(0)}  alice  `);
+		expect(out.prefix).toContain("\x1b[90m");
+		expect(out.prefix).toContain("\x1b[36m");
+		expect(out.prefixWidth).toBe(PREFIX_WIDTH);
+		expect(out.body).toBe("hi");
 	});
 
-	it("prefixes remote messages with [peer]", () => {
-		expect(formatMessage(text("remote-1", "hi"), "local")).toBe("[peer] hi");
+	it("styles peer messages with a magenta nickname padded to the name column", () => {
+		const out = formatMessage(text("remote-1", "hi"), "local", NAMES);
+		expect(out.system).toBe(false);
+		// "peer" + 1 pad space (to match "alice") + 2 separator spaces.
+		expect(stripAnsi(out.prefix)).toBe(`${formatTimestamp(0)}  peer   `);
+		expect(out.prefix).toContain("\x1b[35m");
+		expect(out.prefixWidth).toBe(PREFIX_WIDTH);
 	});
 
-	it("prefixes system entries with [system] even when localId would also match", () => {
+	it("marks system entries as system even when localId would also match", () => {
 		// The CLI mints system ids as `system-${uuid}`; the check has to run
 		// before the local/peer prefix test or a peer UUID could shadow it.
-		expect(formatMessage(text("system-abc", "Connected"), "system")).toBe("[system] Connected");
+		const out = formatMessage(text("system-abc", "Connected"), "system", NAMES);
+		expect(out.system).toBe(true);
+		expect(out.prefix).toBe("");
+		expect(out.prefixWidth).toBe(0);
 	});
 
 	it("summarises a file-start message", () => {
@@ -42,28 +66,46 @@ describe("formatMessage", () => {
 				checksum: "abc",
 			},
 		};
-		expect(formatMessage(message, "local")).toBe("[me] sending file: a.txt");
+		const out = formatMessage(message, "local", NAMES);
+		expect(out.system).toBe(false);
+		expect(out.body).toBe("sending file: a.txt");
 	});
 
-	it("renders markdown in user messages", () => {
+	it("renders markdown in user message bodies", () => {
 		// me/peer messages go through the renderer so bold/italic/etc. show.
-		expect(formatMessage(text("local-1", "**bold**"), "local")).toContain("\x1b[1m");
-		expect(formatMessage(text("remote-1", "**bold**"), "local")).toContain("\x1b[1m");
+		expect(formatMessage(text("local-1", "**bold**"), "local", NAMES).body).toContain("\x1b[1m");
+		expect(formatMessage(text("remote-1", "**bold**"), "local", NAMES).body).toContain("\x1b[1m");
 	});
 
-	it("leaves system messages verbatim — no markdown parsing", () => {
+	it("dims system messages but never markdown-parses them", () => {
 		// A future "Connected to https://x.y" must not become a hyperlink,
 		// and "**notice**" must not become bold.
-		const out = formatMessage(text("system-1", "Connected to https://x.y"), "system");
-		expect(out).toBe("[system] Connected to https://x.y");
-		expect(out).not.toContain("\x1b[");
+		const out = formatMessage(text("system-1", "Connected to https://x.y"), "system", NAMES);
+		expect(out.body).toContain("\x1b[90m");
+		expect(out.body).not.toContain("\x1b[1m");
+		expect(stripAnsi(out.body)).toBe("Connected to https://x.y");
 	});
 
-	it("preserves newlines from peer messages across formatMessage", () => {
+	it("falls back to generic names when nicknames are unknown", () => {
+		const mine = formatMessage(text("local-1", "hi"), "local", { local: "" });
+		expect(stripAnsi(mine.prefix)).toBe(`${formatTimestamp(0)}  me    `);
+		const theirs = formatMessage(text("r-1", "hi"), "local", { local: "" });
+		// nameWidth = max("me", "peer") = 4 → "peer" needs no pad.
+		expect(stripAnsi(theirs.prefix)).toBe(`${formatTimestamp(0)}  peer  `);
+	});
+
+	it("measures CJK nicknames as two columns when padding the name column", () => {
+		// "阿黄" is 4 columns wide, so "ab" needs two pad spaces to align.
+		const out = formatMessage(text("r-1", "hi"), "local", { local: "阿黄", peer: "ab" });
+		expect(stripAnsi(out.prefix)).toBe(`${formatTimestamp(0)}  ab    `);
+		expect(out.prefixWidth).toBe(5 + 2 + 4 + 2);
+	});
+
+	it("preserves newlines from peer messages in the body", () => {
 		// The flattening into a single string is what previously ate
 		// newlines; the renderer must keep them intact for wrap-ansi.
-		const out = formatMessage(text("remote-1", "line one\nline two"), "local");
-		expect(out).toBe("[system] line one\nline two".replace("[system]", "[peer]"));
+		const out = formatMessage(text("remote-1", "line one\nline two"), "local", NAMES);
+		expect(stripAnsi(out.body)).toBe("line one\nline two");
 	});
 });
 
@@ -117,31 +159,58 @@ describe("wrapToWidth", () => {
 
 describe("toDisplayLines", () => {
 	it("returns no lines for no messages", () => {
-		const result = toDisplayLines([], "local", 40);
+		const result = toDisplayLines([], "local", NAMES, 40);
 		expect(result.lines).toEqual([]);
 		expect(result.messageStartIndices).toEqual([]);
 	});
 
 	it("preserves message order", () => {
-		const result = toDisplayLines([text("local-1", "one"), text("r-2", "two")], "local", 40);
-		expect(result.lines).toEqual(["[me] one", "[peer] two"]);
+		const result = toDisplayLines([text("local-1", "one"), text("r-2", "two")], "local", NAMES, 40);
+		expect(result.lines.map(stripAnsi)).toEqual([
+			`${formatTimestamp(0)}  alice  one`,
+			`${formatTimestamp(0)}  peer   two`,
+		]);
 	});
 
-	it("expands into as many lines as each message wraps to", () => {
-		const messages = [text("local-1", "abcdefghij"), text("local-2", "x")];
-		// "[me] abcdefghij" is 15 cols → 3 lines at width 6; "[me] x" → 1 line.
-		expect(toDisplayLines(messages, "local", 6).lines.length).toBe(
-			wrapToWidth("[me] abcdefghij", 6).length + 1,
-		);
+	it("indents soft-wrapped continuation lines to the body column", () => {
+		// prefixWidth 14, contentWidth 18 → body wraps at 4 columns.
+		const result = toDisplayLines([text("local-1", "abcdefgh")], "local", NAMES, 18);
+		expect(result.lines.map(stripAnsi)).toEqual([
+			`${formatTimestamp(0)}  alice  abcd`,
+			`${" ".repeat(PREFIX_WIDTH)}efgh`,
+		]);
+	});
+
+	it("indents embedded newlines to the body column too", () => {
+		const result = toDisplayLines([text("local-1", "ab\ncd")], "local", NAMES, 40);
+		expect(result.lines.map(stripAnsi)).toEqual([
+			`${formatTimestamp(0)}  alice  ab`,
+			`${" ".repeat(PREFIX_WIDTH)}cd`,
+		]);
 	});
 
 	it("records each message's starting line index", () => {
-		// First message wraps to 3 lines, second message starts at line 3.
+		// First message's body wraps to 2 lines, second message starts at line 2.
 		const messages = [text("local-1", "abcdef"), text("r-2", "ghi")];
-		const result = toDisplayLines(messages, "local", 4);
-		// "[me] abcdef" at width 4 → 3 lines: "[me]", " abc", "def".
-		expect(result.messageStartIndices).toEqual([0, 3]);
+		const result = toDisplayLines(messages, "local", NAMES, 18);
+		expect(result.messageStartIndices).toEqual([0, 2]);
 		expect(result.messageStartIndices.length).toBe(messages.length);
+	});
+
+	it("separates a system message from the previous one with a blank line it owns", () => {
+		const messages = [text("local-1", "hi"), text("system-2", "Connected")];
+		const result = toDisplayLines(messages, "local", NAMES, 40);
+		// The separator belongs to the system message's block, so its start
+		// index points at the blank line and double-click still resolves.
+		expect(result.messageStartIndices).toEqual([0, 1]);
+		expect(result.lines[1]).toBe(" ");
+		expect(stripAnsi(result.lines[2] ?? "")).toBe("Connected");
+	});
+
+	it("does not lead with a blank line when the first message is a system entry", () => {
+		const result = toDisplayLines([text("system-1", "Connected")], "local", NAMES, 40);
+		expect(result.messageStartIndices).toEqual([0]);
+		expect(stripAnsi(result.lines[0] ?? "")).toBe("Connected");
 	});
 });
 

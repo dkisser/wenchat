@@ -21,8 +21,10 @@ import {
 	CommandSuggestion,
 	DEFAULT_DOWNLOAD_DIR,
 	FileReceiver,
+	Header,
 	HostPicker,
 	InputBox,
+	MIN_LOGO_HEADER_COLUMNS,
 	PeerList,
 	StatusBar,
 	type StatusBarToast,
@@ -34,10 +36,11 @@ import {
 	useDoubleClick,
 	useTerminalSize,
 } from "@wenchat/ui";
-import { Box, useApp, useInput } from "ink";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Box, Text, useApp, useInput } from "ink";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { copyToClipboard } from "./clipboard";
 import { isMouseModeEnabled, toggleMouseMode } from "./mouseMode";
+import { getCurrentVersion } from "./updater";
 
 export type AppProps = {
 	displayName: string;
@@ -83,6 +86,10 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	// `cli <name> <port> <host>` invocation.
 	const [bindHost, setBindHost] = useState<string | null>(signalingHost ?? null);
 	const [candidates] = useState(() => listBindCandidates());
+	// "host:port" the Header's identity line shows once the signaling
+	// listener is actually bound. Stays null until then — and forever if the
+	// bind fails — so the identity line just omits the endpoint segment.
+	const [localEndpoint, setLocalEndpoint] = useState<string | null>(null);
 
 	const [discovery] = useState(() => new DiscoveryService());
 	const [peerConnection] = useState(() => new PeerConnection());
@@ -227,6 +234,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 				await peerConnection.startListening(signalingPort, bindHost, advertiseHost);
 				if (cancelled) return;
 				const realPort = peerConnection.getSignalingPort();
+				if (realPort > 0) setLocalEndpoint(`${advertiseHost}:${realPort}`);
 				await discovery.start(displayName, realPort, advertiseHost);
 			} catch {
 				// Signaling / discovery failures are swallowed at the CLI
@@ -495,15 +503,29 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	};
 
 	const { rows, columns } = useTerminalSize();
+	// The logo masthead needs its 38 columns plus room for the info column;
+	// below the threshold the single-line StatusBar takes over so nothing
+	// meaningful gets truncated away.
+	const showLogoHeader = columns >= MIN_LOGO_HEADER_COLUMNS;
 	const layout = computeChatLayout({
 		rows,
 		columns,
 		suggestionVisible: isCommandSuggestionVisible(inputText),
+		logoHeader: showLogoHeader,
 	});
+
+	// Referential stability is load-bearing: `names` is a dependency of the
+	// display-lines memo in useChatScroll, so a fresh object per render would
+	// rewrap the entire log on every keystroke.
+	const chatNames = useMemo(
+		() => ({ local: displayName, peer: selectedPeer?.displayName }),
+		[displayName, selectedPeer?.displayName],
+	);
 
 	const scroll = useChatScroll({
 		messages,
 		localId,
+		names: chatNames,
 		contentWidth: layout.contentWidth,
 		viewportHeight: layout.viewportHeight,
 		// Scroll keys stay active whenever the ChatView is on screen —
@@ -549,11 +571,19 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	);
 
 	// Double-clicking a chat row copies that message's original text.
-	// SGR row is 1-based; the first content row inside the bordered chat
-	// is at terminal row `CHROME_ROWS.statusBar + CHROME_ROWS.chatBorder`
-	// (status line + chat top border). Converting to a global display line
-	// index: subtract that header, then add firstLineIndex.
-	const chatTopRow = CHROME_ROWS.statusBar + CHROME_ROWS.chatBorder;
+	// SGR row is 1-based; the first content row of the borderless chat pane
+	// sits at terminal row `topMargin + topChrome + chatGutter + 1` (blank
+	// top margin, Header/StatusBar, blank gutter). Converting to a global
+	// display line index: subtract that header, then add firstLineIndex.
+	const chatTopRow =
+		CHROME_ROWS.topMargin +
+		(showLogoHeader ? CHROME_ROWS.header : CHROME_ROWS.statusBar) +
+		CHROME_ROWS.chatGutter;
+
+	// Shared by the Header and StatusBar branches of the top chrome.
+	const peerEndpoint = selectedPeer
+		? `${selectedPeer.signalingHost}:${selectedPeer.signalingPort}`
+		: undefined;
 	useDoubleClick(
 		useCallback(
 			(_col, row) => {
@@ -586,7 +616,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	// here (offline with an empty log), so it doesn't claim them either.
 	if (bindHost === null) {
 		return (
-			<Box flexDirection="column" height={layout.frameHeight}>
+			<Box flexDirection="column" height={layout.frameHeight} paddingTop={CHROME_ROWS.topMargin}>
 				<Box flexShrink={0}>
 					<StatusBar
 						status="offline"
@@ -599,7 +629,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 					candidates={candidates}
 					signalingPort={signalingPort}
 					onSelect={handleSelectBindHost}
-					height={layout.frameHeight - CHROME_ROWS.statusBar}
+					height={layout.frameHeight - CHROME_ROWS.topMargin - CHROME_ROWS.statusBar}
 				/>
 			</Box>
 		);
@@ -614,26 +644,41 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		// Every direct child needs `flexShrink={0}`. Under a height-constrained
 		// column, yoga shrinks Text children until their rows overlap and
 		// overwrite one another — visible garbage, not clipping.
-		<Box flexDirection="column" height={layout.frameHeight}>
+		<Box flexDirection="column" height={layout.frameHeight} paddingTop={CHROME_ROWS.topMargin}>
 			<Box flexShrink={0}>
-				<StatusBar
-					status={status}
-					peerName={selectedPeer?.displayName}
-					peerEndpoint={
-						selectedPeer ? `${selectedPeer.signalingHost}:${selectedPeer.signalingPort}` : undefined
-					}
-					mouseEnabled={mouseEnabled}
-					toast={toast}
-				/>
+				{showLogoHeader ? (
+					<Header
+						status={status}
+						peerName={selectedPeer?.displayName}
+						peerEndpoint={peerEndpoint}
+						localName={displayName}
+						localEndpoint={localEndpoint ?? undefined}
+						version={getCurrentVersion()}
+						mouseEnabled={mouseEnabled}
+						toast={toast}
+					/>
+				) : (
+					<StatusBar
+						status={status}
+						peerName={selectedPeer?.displayName}
+						peerEndpoint={peerEndpoint}
+						mouseEnabled={mouseEnabled}
+						toast={toast}
+					/>
+				)}
+			</Box>
+			{/* Blank gutter row between the top chrome and the message pane. */}
+			<Box flexShrink={0} height={CHROME_ROWS.chatGutter}>
+				<Text> </Text>
 			</Box>
 			{status === "offline" && messages.length === 0 ? (
-				<PeerList peers={peers} onSelect={handleSelectPeer} height={layout.chatOuterHeight} />
+				<PeerList peers={peers} onSelect={handleSelectPeer} height={layout.viewportHeight} />
 			) : (
 				<ChatView
 					lines={scroll.visibleLines}
 					firstLineIndex={scroll.firstLineIndex}
 					unread={scroll.unread}
-					height={layout.chatOuterHeight}
+					height={layout.viewportHeight}
 				/>
 			)}
 			<Box flexShrink={0}>

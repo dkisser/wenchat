@@ -1,7 +1,7 @@
 import type { Message } from "@wenchat/protocol";
 import { useInput } from "ink";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { sliceViewport, toDisplayLines } from "./displayLines";
+import { type ChatNames, sliceViewport, toDisplayLines } from "./displayLines";
 import {
 	INITIAL_SCROLL_STATE,
 	type ScrollMetrics,
@@ -21,6 +21,13 @@ const DEFAULT_WHEEL_LINES = 3;
 export type UseChatScrollArgs = {
 	readonly messages: readonly Message[];
 	readonly localId: string;
+	/**
+	 * Nicknames for the sender column. Must be referentially stable (e.g. a
+	 * `useMemo` in the caller) — it is a dependency of the display-lines
+	 * memo, so a fresh object per render would rewrap the whole log on every
+	 * keystroke.
+	 */
+	readonly names: ChatNames;
 	readonly contentWidth: number;
 	readonly viewportHeight: number;
 	/** False while the chat is not on screen, so key handling stays exclusive. */
@@ -52,14 +59,15 @@ export type UseChatScrollResult = {
 export function useChatScroll({
 	messages,
 	localId,
+	names,
 	contentWidth,
 	viewportHeight,
 	isActive = true,
 	wheelLines = DEFAULT_WHEEL_LINES,
 }: UseChatScrollArgs): UseChatScrollResult {
 	const display = useMemo(
-		() => toDisplayLines(messages, localId, contentWidth),
-		[messages, localId, contentWidth],
+		() => toDisplayLines(messages, localId, names, contentWidth),
+		[messages, localId, names, contentWidth],
 	);
 	const { lines, messageStartIndices } = display;
 
@@ -85,10 +93,10 @@ export function useChatScroll({
 		}
 	}, [messages.length]);
 
-	// biome-ignore lint/correctness/useExhaustiveDependencies: lines is memoised on messages/localId/contentWidth, so listing those deps transitively captures it
+	// biome-ignore lint/correctness/useExhaustiveDependencies: lines is memoised on messages/localId/names/contentWidth, so listing those deps transitively captures it
 	useEffect(() => {
 		setState((prev) => onViewportChanged(prev, metricsRef.current));
-	}, [viewportHeight, lines.length, messages, localId, contentWidth]);
+	}, [viewportHeight, lines.length, messages, localId, names, contentWidth]);
 
 	useMouseWheel(
 		(direction) => {

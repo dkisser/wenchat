@@ -26,6 +26,8 @@ describe("PeerList", () => {
 		const { lastFrame } = render(<PeerList peers={peers} onSelect={() => {}} height={10} />);
 		const frame = lastFrame() ?? "";
 		expect(frame.split("\n").length).toBe(10);
+		// Borderless, like the ChatView it shares the middle pane with.
+		expect(frame).not.toContain("│");
 		// The selection starts at the first peer, so the window sticks to the top.
 		expect(frame).toContain("peer-0");
 		expect(frame).not.toContain("peer-49");

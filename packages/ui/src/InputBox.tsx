@@ -18,6 +18,23 @@ export type InputBoxProps = {
 };
 
 /**
+ * Horizontal rules only — the input row is framed by a top and a bottom
+ * line, with blank verticals. Ink still counts any defined borderStyle as
+ * one column/row per side, so the layout math (`CHROME_ROWS.inputBox`) is
+ * identical to the old full border.
+ */
+const INPUT_BORDER = {
+	top: "─",
+	bottom: "─",
+	left: " ",
+	right: " ",
+	topLeft: "─",
+	topRight: "─",
+	bottomLeft: "─",
+	bottomRight: "─",
+} as const;
+
+/**
  * Controlled single-line input with shell-style history recall.
  *
  * Behavior:
@@ -148,8 +165,8 @@ export function InputBox({ value, onChange, onSubmit, onCommand, onError }: Inpu
 	const { name: commandName, arg } = splitCommand(value);
 
 	return (
-		<Box borderStyle="single" paddingX={1} width="100%">
-			<Text>{"> "}</Text>
+		<Box borderStyle={INPUT_BORDER} paddingX={1} width="100%">
+			<Text color="cyan">{"❯ "}</Text>
 			{commandName.length > 0 && (
 				<Text color="cyan" bold>
 					{commandName}

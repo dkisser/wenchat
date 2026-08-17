@@ -1,5 +1,6 @@
 export * from "./ChatView";
 export * from "./CommandSuggestion";
+export * from "./Header";
 export * from "./HostPicker";
 export * from "./InputBox";
 export * from "./PeerList";
@@ -10,6 +11,7 @@ export * from "./displayLines";
 export * from "./fileReceiver";
 export * from "./historyStore";
 export * from "./listWindow";
+export * from "./logo";
 export * from "./magicCommands";
 export * from "./markdown";
 export * from "./mouseEvents";

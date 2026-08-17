@@ -14,9 +14,9 @@ describe("computeChatLayout", () => {
 		const layout = computeChatLayout({ rows: 24, columns: 80, suggestionVisible: false });
 		expect(layout).toEqual({
 			frameHeight: 23,
-			chatOuterHeight: 19,
+			chatOuterHeight: 18,
 			viewportHeight: 17,
-			contentWidth: 76,
+			contentWidth: 78,
 			degraded: false,
 		});
 	});
@@ -28,16 +28,30 @@ describe("computeChatLayout", () => {
 		expect(withRow.frameHeight).toBe(without.frameHeight);
 	});
 
-	it("keeps the chat box exactly two rows taller than its viewport (its border)", () => {
-		const layout = computeChatLayout({ rows: 40, columns: 120, suggestionVisible: false });
-		expect(layout.chatOuterHeight - layout.viewportHeight).toBe(CHROME_ROWS.chatBorder);
+	it("trades three viewport rows for the logo header when it replaces the StatusBar", () => {
+		const bar = computeChatLayout({ rows: 24, columns: 80, suggestionVisible: false });
+		const logo = computeChatLayout({
+			rows: 24,
+			columns: 80,
+			suggestionVisible: false,
+			logoHeader: true,
+		});
+		expect(bar.chatOuterHeight - logo.chatOuterHeight).toBe(
+			CHROME_ROWS.header - CHROME_ROWS.statusBar,
+		);
+		expect(logo.frameHeight).toBe(bar.frameHeight);
 	});
 
-	it("subtracts border + padding from the columns to get the content width", () => {
-		// getMaxWidth = width - paddingLeft - paddingRight - borderLeft - borderRight
+	it("reserves exactly one gutter row between the top chrome and the chat viewport", () => {
+		const layout = computeChatLayout({ rows: 40, columns: 120, suggestionVisible: false });
+		expect(layout.chatOuterHeight - layout.viewportHeight).toBe(CHROME_ROWS.chatGutter);
+	});
+
+	it("subtracts left + right padding from the columns to get the content width", () => {
+		// The chat pane is borderless now: getMaxWidth = width - paddingLeft - paddingRight
 		expect(
 			computeChatLayout({ rows: 24, columns: 20, suggestionVisible: false }).contentWidth,
-		).toBe(16);
+		).toBe(18);
 	});
 
 	it("floors the frame height so a tiny terminal never produces negative sizes", () => {
@@ -49,9 +63,9 @@ describe("computeChatLayout", () => {
 	});
 
 	it("flags a terminal too short to hold the full chrome as degraded", () => {
-		// StatusBar (1) + InputBox (3) = 4 rows of fixed chrome. With a
-		// 6-row frame (`rows - 1`), only 2 rows are left for the chat box
-		// — below the 3-row floor, so degraded.
+		// topMargin (1) + StatusBar (1) + InputBox (3) = 5 rows of fixed
+		// chrome. With a 6-row frame (`rows - 1`), only 1 row is left for the
+		// chat pane — below the 3-row floor, so degraded.
 		expect(computeChatLayout({ rows: 7, columns: 80, suggestionVisible: false }).degraded).toBe(
 			true,
 		);

@@ -13,7 +13,21 @@ describe("InputBox", () => {
 		const { lastFrame } = render(
 			<InputBox value="" onChange={() => {}} onSubmit={() => {}} onCommand={() => {}} />,
 		);
-		expect(lastFrame()).toContain(">");
+		expect(lastFrame()).toContain("❯");
+	});
+
+	it("draws only top and bottom rules — no vertical border lines", () => {
+		const { lastFrame } = render(
+			<InputBox value="hello" onChange={() => {}} onSubmit={() => {}} onCommand={() => {}} />,
+		);
+		const rows = (lastFrame() ?? "").split("\n");
+		expect(rows.length).toBe(3);
+		expect(rows[0]?.trim()).toMatch(/^─+$/);
+		expect(rows[2]?.trim()).toMatch(/^─+$/);
+		const frame = lastFrame() ?? "";
+		for (const ch of ["│", "┌", "┐", "└", "┘"]) {
+			expect(frame).not.toContain(ch);
+		}
 	});
 
 	it("renders the current value", () => {

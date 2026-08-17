@@ -1,5 +1,7 @@
 import { Box, Text } from "ink";
 
+export type StatusBarStatus = "offline" | "connecting" | "online";
+
 export type StatusBarToast = {
 	readonly text: string;
 	/** "info" prints in dim gray (matches the existing hint palette);
@@ -7,8 +9,26 @@ export type StatusBarToast = {
 	readonly tone?: "info" | "error";
 };
 
+/**
+ * One-line description of the connection state, shared by StatusBar and
+ * Header so the two chrome variants never drift apart in wording.
+ */
+export function formatStatusText(
+	status: StatusBarStatus,
+	peerName?: string,
+	peerEndpoint?: string,
+): string {
+	if (status === "offline") return "Offline";
+	if (status === "connecting") return "Connecting...";
+	return `Online${peerName ? ` • ${peerName}` : ""}${peerEndpoint ? ` (${peerEndpoint})` : ""}`;
+}
+
+export function statusColor(status: StatusBarStatus): string {
+	return status === "online" ? "green" : status === "connecting" ? "yellow" : "gray";
+}
+
 export type StatusBarProps = {
-	status: "offline" | "connecting" | "online";
+	status: StatusBarStatus;
 	peerName?: string;
 	peerEndpoint?: string;
 	/**
@@ -45,18 +65,13 @@ export function StatusBar({
 	hint,
 	toast = null,
 }: StatusBarProps) {
-	const statusText = {
-		offline: "Offline",
-		connecting: "Connecting...",
-		online: `Online${peerName ? ` • ${peerName}` : ""}${peerEndpoint ? ` (${peerEndpoint})` : ""}`,
-	};
-
-	const color = status === "online" ? "green" : status === "connecting" ? "yellow" : "gray";
+	const statusText = formatStatusText(status, peerName, peerEndpoint);
+	const color = statusColor(status);
 
 	return (
 		<Box paddingLeft={1} flexDirection="row" justifyContent="space-between" width="100%">
 			<Box flexShrink={1}>
-				<Text color={color}>{statusText[status]}</Text>
+				<Text color={color}>{statusText}</Text>
 				{hint && <Text color="gray">{`  • ${hint}`}</Text>}
 				{!mouseEnabled && (
 					<Text color="gray">{"  • Select mode (Ctrl+T or /mouse to scroll)"}</Text>

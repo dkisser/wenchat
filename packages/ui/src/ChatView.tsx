@@ -8,8 +8,9 @@ export type ChatViewProps = {
 	/** Messages that arrived while the user was scrolled up. */
 	readonly unread?: number;
 	/**
-	 * Outer height in terminal rows, borders included. Omit to size to
-	 * content (non-TTY output and tests, where there is nothing to pin).
+	 * Viewport height in terminal rows — the pane is borderless, so this is
+	 * exactly the number of display lines shown. Omit to size to content
+	 * (non-TTY output and tests, where there is nothing to pin).
 	 */
 	readonly height?: number;
 };
@@ -19,7 +20,7 @@ export type ChatViewProps = {
  * this component only draws the window it is handed.
  */
 export function ChatView({ lines, firstLineIndex = 0, unread = 0, height }: ChatViewProps) {
-	const capacity = height === undefined ? lines.length : Math.max(height - 2, 1);
+	const capacity = height === undefined ? lines.length : Math.max(height, 1);
 
 	// The unread indicator takes over the last visible row instead of adding
 	// one. Adding a row would make the viewport height depend on `unread`,
@@ -33,7 +34,6 @@ export function ChatView({ lines, firstLineIndex = 0, unread = 0, height }: Chat
 	return (
 		<Box
 			flexDirection="column"
-			borderStyle="single"
 			paddingX={1}
 			height={height}
 			flexShrink={0}

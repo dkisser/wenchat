@@ -7,14 +7,14 @@ export type PeerListProps = {
 	peers: PeerInfo[];
 	onSelect: (peer: PeerInfo) => void;
 	/**
-	 * Outer height in terminal rows, borders included. Omit to size to
-	 * content (non-TTY output and tests).
+	 * Viewport height in terminal rows — borderless, like the ChatView this
+	 * pane swaps with. Omit to size to content (non-TTY output and tests).
 	 */
 	height?: number;
 };
 
-/** Border rows plus the "Peers" heading. */
-const PEER_LIST_CHROME_ROWS = 3;
+/** Just the "Peers" heading — the pane draws no borders. */
+const PEER_LIST_CHROME_ROWS = 1;
 
 export function PeerList({ peers, onSelect, height }: PeerListProps) {
 	const [selectedIndex, setSelectedIndex] = useState(0);
@@ -43,7 +43,6 @@ export function PeerList({ peers, onSelect, height }: PeerListProps) {
 	return (
 		<Box
 			flexDirection="column"
-			borderStyle="single"
 			paddingX={1}
 			height={height}
 			flexShrink={0}

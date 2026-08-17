@@ -32,6 +32,7 @@ function Probe({ messages, viewportHeight = 5, isActive = true }: ProbeProps) {
 	const { visibleLines, unread, atBottom } = useChatScroll({
 		messages,
 		localId: "local",
+		names: { local: "local" },
 		contentWidth: 40,
 		viewportHeight,
 		isActive,
@@ -39,12 +40,22 @@ function Probe({ messages, viewportHeight = 5, isActive = true }: ProbeProps) {
 	return <Text>{`${visibleLines.join(",")}|unread=${unread}|bottom=${atBottom}`}</Text>;
 }
 
+// Display lines carry a styled "HH:mm  name  " prefix; assertions target the
+// message bodies (`mNN`), which the prefixes never contain.
+const expectWindow = (frame: string, from: number, to: number) => {
+	for (let i = from; i <= to; i++) {
+		expect(frame).toContain(`m${i}`);
+	}
+};
+
 describe("useChatScroll", () => {
 	it("shows the newest lines by default", async () => {
 		const { lastFrame } = render(<Probe messages={log(20)} />);
 		await tick();
-		expect(lastFrame()).toContain("[me] m15,[me] m16,[me] m17,[me] m18,[me] m19");
-		expect(lastFrame()).toContain("bottom=true");
+		const frame = lastFrame() ?? "";
+		expectWindow(frame, 15, 19);
+		expect(frame).not.toContain("m14");
+		expect(frame).toContain("bottom=true");
 	});
 
 	it("scrolls up three lines per wheel tick", async () => {
@@ -54,8 +65,10 @@ describe("useChatScroll", () => {
 		stdin.write(WHEEL_UP);
 		await tick();
 
-		expect(lastFrame()).toContain("[me] m12,[me] m13,[me] m14,[me] m15,[me] m16");
-		expect(lastFrame()).toContain("bottom=false");
+		const frame = lastFrame() ?? "";
+		expectWindow(frame, 12, 16);
+		expect(frame).not.toContain("m17");
+		expect(frame).toContain("bottom=false");
 	});
 
 	it("scrolls back down and re-follows the tail", async () => {
@@ -67,7 +80,7 @@ describe("useChatScroll", () => {
 		stdin.write(WHEEL_DOWN);
 		await tick();
 
-		expect(lastFrame()).toContain("[me] m19");
+		expect(lastFrame()).toContain("m19");
 		expect(lastFrame()).toContain("bottom=true");
 	});
 
@@ -82,7 +95,7 @@ describe("useChatScroll", () => {
 		rerender(<Probe messages={[...log(20), ...log(2, 20)]} />);
 		await tick();
 
-		expect(lastFrame()).toContain("[me] m12,[me] m13,[me] m14,[me] m15,[me] m16");
+		expectWindow(lastFrame() ?? "", 12, 16);
 		expect(lastFrame()).toContain("unread=2");
 		expect(beforeAppend).toContain("unread=0");
 	});
@@ -94,7 +107,7 @@ describe("useChatScroll", () => {
 		rerender(<Probe messages={[...log(20), ...log(2, 20)]} />);
 		await tick();
 
-		expect(lastFrame()).toContain("[me] m21");
+		expect(lastFrame()).toContain("m21");
 		expect(lastFrame()).toContain("unread=0");
 	});
 
@@ -124,11 +137,11 @@ describe("useChatScroll", () => {
 		stdin.write(PAGE_UP);
 		await tick();
 		// viewportHeight 5 → a page is 4 lines.
-		expect(lastFrame()).toContain("[me] m21,[me] m22,[me] m23,[me] m24,[me] m25");
+		expectWindow(lastFrame() ?? "", 21, 25);
 
 		stdin.write(PAGE_DOWN);
 		await tick();
-		expect(lastFrame()).toContain("[me] m29");
+		expect(lastFrame()).toContain("m29");
 	});
 
 	it("scrolls one line with Shift+Up", async () => {
@@ -138,7 +151,7 @@ describe("useChatScroll", () => {
 		stdin.write(SHIFT_UP);
 		await tick();
 
-		expect(lastFrame()).toContain("[me] m14,[me] m15,[me] m16,[me] m17,[me] m18");
+		expectWindow(lastFrame() ?? "", 14, 18);
 	});
 
 	it("ignores scroll input while inactive", async () => {
@@ -149,7 +162,7 @@ describe("useChatScroll", () => {
 		stdin.write(PAGE_UP);
 		await tick();
 
-		expect(lastFrame()).toContain("[me] m19");
+		expect(lastFrame()).toContain("m19");
 	});
 
 	it("re-clamps when the message log is trimmed underneath it", async () => {
@@ -166,6 +179,6 @@ describe("useChatScroll", () => {
 		await tick();
 
 		expect(lastFrame()).toContain("bottom=true");
-		expect(lastFrame()).toContain("[me] m5");
+		expect(lastFrame()).toContain("m5");
 	});
 });

@@ -27,10 +27,20 @@ describe("ChatView", () => {
 		// An empty <Text> renders zero rows in ink, which would silently
 		// shrink the frame — blank lines must be emitted as a space.
 		const { lastFrame } = render(<ChatView lines={["a", "", "b"]} height={5} />);
-		const inner = frameLines(lastFrame()).slice(1, -1);
-		expect(inner.length).toBe(3);
-		expect(inner[0]).toContain("a");
-		expect(inner[2]).toContain("b");
+		const rows = frameLines(lastFrame());
+		expect(rows[0]).toContain("a");
+		expect((rows[1] ?? "").trim()).toBe("");
+		expect(rows[2]).toContain("b");
+	});
+
+	it("draws no borders and keeps one column of horizontal padding", () => {
+		const { lastFrame } = render(<ChatView lines={["hello"]} height={3} />);
+		const frame = lastFrame() ?? "";
+		expect(frame).not.toContain("│");
+		expect(frame).not.toContain("┌");
+		expect(frame).not.toContain("└");
+		// paddingX={1} aligns the message column with the Header's paddingLeft.
+		expect(frameLines(frame)[0]).toBe(" hello");
 	});
 
 	it("shows a pluralised unread indicator", () => {
@@ -44,14 +54,14 @@ describe("ChatView", () => {
 	});
 
 	it("replaces the last visible line with the indicator rather than growing", () => {
-		const lines = ["a", "b", "c"];
+		const lines = ["a", "b", "c", "d", "e"];
 		const withIndicator = render(<ChatView lines={lines} height={5} unread={2} />);
 		const frame = withIndicator.lastFrame() ?? "";
 
 		expect(frameLines(frame).length).toBe(5);
-		expect(frame).toContain("a");
-		expect(frame).toContain("b");
-		expect(frame).not.toContain("c");
+		expect(frame).toContain("d");
+		// Match the whole padded row — a bare "e" would also hit "messages".
+		expect(frame).not.toMatch(/^ e$/m);
 	});
 
 	it("renders no indicator when nothing is unread", () => {
@@ -61,7 +71,7 @@ describe("ChatView", () => {
 
 	it("grows to fit when no height is given (non-TTY / test rendering)", () => {
 		const { lastFrame } = render(<ChatView lines={["a", "b", "c"]} />);
-		expect(frameLines(lastFrame()).length).toBe(5);
+		expect(frameLines(lastFrame()).length).toBe(3);
 	});
 });
 
