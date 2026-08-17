@@ -8,6 +8,7 @@ export * from "./StatusBar";
 export * from "./chatLayout";
 export * from "./commandHistory";
 export * from "./displayLines";
+export * from "./expandTilde";
 export * from "./fileReceiver";
 export * from "./historyStore";
 export * from "./listWindow";
