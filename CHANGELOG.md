@@ -5,6 +5,31 @@ All notable changes to WenChat will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.4] - 2026-08-17
+
+### Added
+
+- **Logo header and improved chat layout.** The CLI now renders a branded
+  header above the chat viewport and lays out messages so the conversation
+  area stays visually anchored while the peer list and input remain usable.
+
+- **Display name from positional arguments.** `wenchat <nickname>` now uses
+  the supplied nickname directly, making scripted or habitual invocations
+  faster than waiting for the default random name.
+
+### Fixed
+
+- **Heartbeat no longer ticks before the WebRTC `DataChannel` is attached.**
+  The watchdog interval previously started as soon as the peer connection
+  initialized, so a failed or slow ICE negotiation could fire timeouts
+  against a channel that did not exist yet and produce a misleading
+  "disconnected" state. Ticks now begin only after the channel opens.
+
+- **mDNS now advertises the correct signaling port.** The published Bonjour
+  TXT record was using a stale default in some code paths, so LAN peers
+  discovered the service but dialed the wrong endpoint. Discovery now
+  publishes the port the HTTP signaling server actually bound.
+
 ## [0.1.3] - 2026-08-14
 
 ### Fixed
@@ -120,3 +145,5 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 [0.1.0]: https://github.com/dkisser/wenchat/releases/tag/v0.1.0
 [0.1.2]: https://github.com/dkisser/wenchat/releases/tag/v0.1.2
+[0.1.3]: https://github.com/dkisser/wenchat/releases/tag/v0.1.3
+[0.1.4]: https://github.com/dkisser/wenchat/releases/tag/v0.1.4
