@@ -1,4 +1,5 @@
 import process from "node:process";
+import { getLogger } from "@wenchat/core";
 
 export type TerminalReleaseFn = () => void;
 
@@ -50,11 +51,17 @@ export function installTerminalSafetyNet(releases: readonly TerminalReleaseFn[])
 	};
 	const onUncaught = (err: unknown) => {
 		const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+		// Best-effort: the crash detail also lands in the daily log file, so a
+		// TUI session that dies leaves a durable trace (stderr is transient).
+		getLogger().fatal({ err }, "uncaught exception");
+		getLogger().flush();
 		process.stderr.write(`\n[cli] uncaught: ${detail}\n`);
 		releaseAll();
 		process.exit(1);
 	};
 	const onUnhandledRejection = (reason: unknown) => {
+		getLogger().fatal({ err: reason }, "unhandled rejection");
+		getLogger().flush();
 		process.stderr.write(`\n[cli] unhandled rejection: ${String(reason)}\n`);
 		releaseAll();
 		process.exit(1);

@@ -1,5 +1,6 @@
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { getLogger } from "./logger";
 
 export type SdpPayload = {
 	type: string;
@@ -111,6 +112,7 @@ export class SignalingServer {
 				res.end();
 			}
 		} catch (err) {
+			getLogger().warn({ err: getErrorMessage(err), url }, "signaling request failed");
 			res.writeHead(400);
 			res.end(JSON.stringify({ error: getErrorMessage(err) }));
 		}

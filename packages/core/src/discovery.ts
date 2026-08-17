@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { PeerInfo } from "@wenchat/protocol";
 import Bonjour from "bonjour-service";
+import { getLogger } from "./logger";
 
 const SERVICE_TYPE = "wenchat";
 const SERVICE_PROTOCOL = "tcp";
@@ -54,8 +55,9 @@ export class DiscoveryService {
 		this.bonjour =
 			bonjour ??
 			(new Bonjour(undefined, (err: unknown) => {
-				const message = getErrorMessage(err);
-				process.stderr.write(`[discovery] mDNS error: ${message}\n`);
+				// Never stderr — the CLI runs an alt-screen TUI. The daily log
+				// file under the workspace root's logs/ gets mDNS errors instead.
+				getLogger().error({ err: getErrorMessage(err) }, "mDNS error");
 			}) as unknown as BonjourLike);
 		this.localId =
 			options.localId ?? loadOrCreateLocalId(options.localIdPath ?? DEFAULT_LOCAL_ID_PATH);

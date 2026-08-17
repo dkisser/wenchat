@@ -11,7 +11,7 @@
 // it stays stable across CLI runs. As long as you keep using the same nickname
 // and the localId file is intact, the instance name stays stable and
 // mDNSResponder has nothing to rename.
-import { getLanHost } from "@wenchat/core";
+import { getLanHost, initLogger } from "@wenchat/core";
 import { render } from "ink";
 import { App } from "./App";
 import { enterAltScreen, exitAltScreen } from "./altScreen";
@@ -73,6 +73,11 @@ const signalingHost: string | undefined = explicitHost
 	: isInteractive
 		? undefined
 		: getLanHost();
+
+// File logging starts here — after the subcommand dispatch above so
+// `version` / `help` / `upgrade` never create `~/.wenchat/logs`.
+const logger = await initLogger();
+logger.info({ pid: process.pid, argv: rawArgs }, "startup");
 
 // Enter the alternate screen buffer BEFORE Ink mounts so the user sees a
 // clean fullscreen surface, not the moment of "scrollback → TUI" transition.
