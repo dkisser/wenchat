@@ -3,6 +3,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	_resetLoggerForTests,
 	getLogDir,
 	getLogFilePath,
 	getLogger,
@@ -18,6 +19,10 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	// Reset the process-wide logger BEFORE deleting the temp dir, so its
+	// sonic-boom destination never points at a removed file (see
+	// _resetLoggerForTests).
+	_resetLoggerForTests();
 	await rm(scratchDir, { recursive: true, force: true });
 });
 

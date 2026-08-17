@@ -147,3 +147,25 @@ function armMidnightRollover(logDir: string, level: string, now: Date): void {
 export function getLogger(): Logger {
 	return current;
 }
+
+/**
+ * Test-only escape hatch: drop the process-wide logger back to the
+ * disabled no-op and cancel the midnight timer. Without this, a logger
+ * initialized against a test's temp dir keeps a sonic-boom destination
+ * whose file the test's cleanup then deletes — the async open fails with
+ * ENOENT and the next `getLogger().warn` in an unrelated test throws
+ * `RangeError: fd out of range (-1)` on Linux CI.
+ */
+export function _resetLoggerForTests(): void {
+	if (midnightTimer) {
+		clearTimeout(midnightTimer);
+		midnightTimer = undefined;
+	}
+	try {
+		current.flush();
+	} catch {
+		// The destination may already be broken (its file deleted) — it is
+		// being discarded either way.
+	}
+	current = pino({ enabled: false });
+}
