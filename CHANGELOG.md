@@ -5,6 +5,58 @@ All notable changes to WenChat will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Fuzzy file picker for `/file`.** Typing `/file <partial>` now opens an
+  inline candidate list above the input box (at most four rows, directories
+  first, dotfiles hidden until the query starts with a dot). `↑`/`↓` move
+  the selection, Enter fills the path into the input — a second Enter
+  sends — accepting a directory descends into it, and Esc dismisses the
+  picker until the input changes. Matching is fuzzy (powered by
+  `fuzzysort`), so `dcmp` finds `docker-compose.yml`.
+
+- **`~` paths in `/file`.** `/file ~/report.pdf` and `/file ~/` now expand
+  against the home directory instead of failing with a missing-file error.
+
+- **File-based logging.** The app now logs to
+  `<workspaceRoot>/logs/wenchat-<date>.log` (pino, async), rotating daily
+  and keeping the most recent seven days. The workspace root is
+  `~/.wenchat` for a packed release binary and the current working
+  directory for a source-checkout dev run, so development logs never mix
+  with the deployed location. Startup, connection lifecycle, transfer
+  events, and crashes (`uncaughtException` / `unhandledRejection`) are
+  recorded; error system-messages in the UI name the current log file.
+  `WENCHAT_LOG_LEVEL` overrides the level.
+
+### Fixed
+
+- **Large file transfers no longer crash the app.** `/file` used to read
+  the whole file into memory, JSON-encode every chunk as a number array
+  (~3× wire expansion), and push thousands of chunk messages into React
+  state — a 100 MB file OOM-crashed the process. Transfers now stream
+  64 KiB frames (22-byte binary header instead of JSON), pause at a 4 MiB
+  buffer high-water mark, write to a `<name>.part` temp file on the
+  receiver, verify a SHA-256 checksum, and atomically rename into
+  `~/Downloads`. Sender memory stays bounded regardless of file size, so
+  there is no hard transfer size limit anymore.
+
+- **A dead data channel no longer leaves both peers phantom-online.**
+  Previously nothing wired the channel's close event into session state,
+  so after a failed transfer both sides kept showing "online", the
+  heartbeat kept running on a dead channel, and the "Already connected"
+  guard blocked reconnection — both sides had to restart. A channel close
+  now terminates the session (exactly one terminal state), frees the UI to
+  reconnect, and a failed transfer can be redialed without restarting.
+
+### Changed
+
+- **Wire format for file transfer is now binary-framed.** Text, ping, and
+  pong messages are byte-identical to previous versions, so text chat
+  works across versions; `/file` between an old and a new build will fail
+  (loudly, not crash) — upgrade both ends to transfer files.
+
 ## [0.1.4] - 2026-08-17
 
 ### Added
