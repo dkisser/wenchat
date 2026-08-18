@@ -217,5 +217,13 @@ export function _resetLoggerForTests(): void {
 	const outgoing = currentDestination;
 	currentDestination = undefined;
 	current = pino({ enabled: false });
+	// Swallow async open errors on the outgoing sonic-boom destination.
+	// When `sync: false`, the file open is asynchronous; if a test resets
+	// and deletes its temp dir before that open completes, sonic-boom emits
+	// an unhandled `error` event. Attaching a no-op listener prevents the
+	// unhandled error from failing unrelated tests on CI.
+	if (outgoing) {
+		outgoing.on("error", () => {});
+	}
 	closeDestination(outgoing);
 }
