@@ -82,23 +82,31 @@ export class Session {
 
 		session.installPeerConnection();
 
-		const channel = session.pc.createDataChannel(DATA_CHANNEL_LABEL);
-		session.attachTransport(channel as unknown as RTCDataChannel);
+		try {
+			const channel = session.pc.createDataChannel(DATA_CHANNEL_LABEL);
+			session.attachTransport(channel as unknown as RTCDataChannel);
 
-		const offer = await session.pc.createOffer();
-		await session.pc.setLocalDescription(offer);
+			const offer = await session.pc.createOffer();
+			await session.pc.setLocalDescription(offer);
 
-		const answer = await session.signaling.sendOffer(opts.remoteHost, opts.remotePort, {
-			type: "offer",
-			sdp: offer.sdp,
-			signalingHost: opts.localHost,
-			signalingPort: opts.localPort,
-		});
+			const answer = await session.signaling.sendOffer(opts.remoteHost, opts.remotePort, {
+				type: "offer",
+				sdp: offer.sdp,
+				signalingHost: opts.localHost,
+				signalingPort: opts.localPort,
+			});
 
-		await session.pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
-		await session.flushPendingCandidates();
+			await session.pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+			await session.flushPendingCandidates();
 
-		return session;
+			return session;
+		} catch (err) {
+			// The handshake failed AFTER the pc was created — without teardown
+			// the half-open pc (UDP socket, ICE gathering) leaks for the rest
+			// of the process on every failed `/connect`.
+			session.abortAfterFailedHandshake();
+			throw err;
+		}
 	}
 
 	/**
@@ -116,14 +124,21 @@ export class Session {
 
 		session.installPeerConnection();
 
-		await session.pc.setRemoteDescription({ type: "offer", sdp: opts.offer.sdp });
-		const answer = await session.pc.createAnswer();
-		await session.pc.setLocalDescription(answer);
+		try {
+			await session.pc.setRemoteDescription({ type: "offer", sdp: opts.offer.sdp });
+			const answer = await session.pc.createAnswer();
+			await session.pc.setLocalDescription(answer);
 
-		session._answerSdp = answer.sdp;
-		await session.flushPendingCandidates();
+			session._answerSdp = answer.sdp;
+			await session.flushPendingCandidates();
 
-		return session;
+			return session;
+		} catch (err) {
+			// Same leak guard as initiate(): a malformed offer or ICE error
+			// must not strand the freshly created pc.
+			session.abortAfterFailedHandshake();
+			throw err;
+		}
 	}
 
 	get answerSdp(): string | undefined {
@@ -277,6 +292,19 @@ export class Session {
 			await this.addIceCandidate(candidate);
 		}
 		this.pendingCandidates = [];
+	}
+
+	/**
+	 * Best-effort teardown after a failed handshake. Never throws — the
+	 * original handshake error is the one the caller needs.
+	 */
+	private abortAfterFailedHandshake(): void {
+		try {
+			this.close();
+		} catch {
+			// close() on a half-initialized pc may itself throw; the
+			// handshake error being rethrown takes precedence.
+		}
 	}
 
 	private notifyStateChange(state: string): void {

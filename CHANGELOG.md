@@ -50,6 +50,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   now terminates the session (exactly one terminal state), frees the UI to
   reconnect, and a failed transfer can be redialed without restarting.
 
+- **A failed handshake no longer leaks its peer connection.** If the
+  offer POST or the SDP exchange threw, the freshly created
+  `RTCPeerConnection` (UDP socket, ICE gathering) stayed alive for the
+  rest of the process — repeated `/connect` attempts against an offline
+  peer accumulated them. Both `initiate` and `accept` now tear the pc
+  down before rethrowing.
+
 - **Daily log rotation no longer leaks a file descriptor per day, and
   the log tail survives a normal exit.** Midnight rollover now `end()`s
   the previous day's pino destination (draining its buffer before closing
