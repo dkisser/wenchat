@@ -15,8 +15,8 @@ import { getLanHost, initLogger } from "@wenchat/core";
 import { render } from "ink";
 import { App } from "./App";
 import { enterAltScreen, exitAltScreen } from "./altScreen";
-import { resolveDisplayName } from "./displayName";
 import { enterMouseMode, exitMouseMode } from "./mouseMode";
+import { type CliAction, parseCliArgs } from "./parseArgs";
 import { installTerminalSafetyNet } from "./terminalSafetyNet";
 import { HELP_TEXT, getCurrentVersion, upgradeCli } from "./updater";
 
@@ -24,23 +24,30 @@ import { HELP_TEXT, getCurrentVersion, upgradeCli } from "./updater";
 // `wenchat version`, `wenchat upgrade`, and `wenchat help` never touch the
 // terminal (no alt screen, no mouse mode, no React mount).
 const rawArgs = process.argv.slice(2);
-const first = rawArgs[0];
 
-if (first === "version" || first === "--version" || first === "-v") {
+let action: CliAction;
+try {
+	action = parseCliArgs(rawArgs);
+} catch (err: unknown) {
+	const msg = err instanceof Error ? err.message : String(err);
+	process.stderr.write(`wenchat: ${msg}\n`);
+	process.exit(1);
+}
+
+if (action.kind === "version") {
 	process.stdout.write(`wenchat ${getCurrentVersion()}\n`);
 	process.exit(0);
 }
-if (first === "help" || first === "--help" || first === "-h") {
+if (action.kind === "help") {
 	process.stdout.write(HELP_TEXT);
 	process.exit(0);
 }
-if (first === "upgrade" || first === "update") {
+if (action.kind === "upgrade") {
 	// Top-level await (ES2022) suspends the module so we never fall through
 	// into the TUI mount below. process.exit terminates before any React tree
 	// could materialize. Biome rejects top-level `return`, hence this shape.
-	const checkOnly = rawArgs.includes("--check-only");
 	try {
-		const code = await upgradeCli({ checkOnly });
+		const code = await upgradeCli({ checkOnly: action.checkOnly });
 		process.exit(code);
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
@@ -49,24 +56,12 @@ if (first === "upgrade" || first === "update") {
 	}
 }
 
-// Filter --no-mouse (and any future flags) out of argv before the positional
-// parsing, so `args[0..2]` retain their current shape.
-const flags = new Set<string>();
-const positional: string[] = [];
-for (const arg of rawArgs) {
-	if (arg.startsWith("--")) flags.add(arg);
-	else positional.push(arg);
-}
-const mouseEnabled = !flags.has("--no-mouse");
-
-const displayName = resolveDisplayName(positional);
-const signalingPort = Number(positional[1]) || 0;
+const { displayName, signalingPort, signalingHost: explicitHost, mouseEnabled } = action;
 // arg[2] is the bind host. Given explicitly (e.g. on a multi-homed host) it
 // wins outright and the app boots straight into the peer list, exactly as
 // before. Left out, an interactive run gets the startup picker — `undefined`
 // is the signal App reads — while a piped/redirected run keeps the old
 // silent default, since there is nobody there to answer a prompt.
-const explicitHost = positional[2];
 const isInteractive = process.stdout.isTTY === true && process.stdin.isTTY === true;
 const signalingHost: string | undefined = explicitHost
 	? explicitHost
