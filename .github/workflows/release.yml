@@ -74,6 +74,7 @@ jobs:
     needs: [build, upload-install-scripts]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -84,6 +85,51 @@ jobs:
           # rename step above. Do NOT include install.sh or the lockfile.
           find . -type f -name 'wenchat-v*' -exec sha256sum {} \; > SHA256SUMS
           cat SHA256SUMS
+      - name: Read release notes
+        id: notes
+        run: |
+          if [ -f "release-notes/${{ github.ref_name }}.md" ]; then
+            {
+              echo "body<<EOF"
+              echo "## What's new in ${{ github.ref_name }}"
+              echo ""
+              cat "release-notes/${{ github.ref_name }}.md"
+              echo ""
+              echo "---"
+              echo ""
+              echo "## Install"
+              echo ""
+              echo "### Quick (Linux / macOS)"
+              echo '```sh'
+              echo "curl -fsSL https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.sh | bash"
+              echo '```'
+              echo ""
+              echo "### Windows (PowerShell)"
+              echo '```powershell'
+              echo "iwr -useb https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.ps1 | iex"
+              echo '```'
+              echo ""
+              echo "### Direct download"
+              echo "| Platform | File |"
+              echo "| --- | --- |"
+              echo "| Linux x86_64 | \`wenchat-${{ github.ref_name }}-linux-x64\` |"
+              echo "| macOS Apple Silicon | \`wenchat-${{ github.ref_name }}-darwin-arm64\` |"
+              echo "| Windows x64 | \`wenchat-${{ github.ref_name }}-windows-x64.exe\` |"
+              echo ""
+              echo "### Upgrade an existing install"
+              echo '```sh'
+              echo "wenchat upgrade"
+              echo '```'
+              echo ""
+              echo "## First-run note (macOS / Windows)"
+              echo "Unsigned binaries trigger a one-time system prompt. Click through"
+              echo "it once; subsequent runs are silent. (No Apple Developer ID or"
+              echo "code-signing certificate is required for a CLI tool.)"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "body=Release notes file not found." >> "$GITHUB_OUTPUT"
+          fi
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -91,36 +137,8 @@ jobs:
             artifacts/wenchat-*/*
             artifacts/install-scripts/*
             artifacts/SHA256SUMS
-          generate_release_notes: true
+          generate_release_notes: false
           fail_on_unmatched_files: true
           # `v0.1.0` -> `0.1.0`. Drop the leading "v" for the title.
           name: ${{ github.ref_name }}
-          body: |
-            ## Install
-
-            ### Quick (Linux / macOS)
-            ```sh
-            curl -fsSL https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.sh | bash
-            ```
-
-            ### Windows (PowerShell)
-            ```powershell
-            iwr -useb https://raw.githubusercontent.com/dkisser/wenchat/main/scripts/install.ps1 | iex
-            ```
-
-            ### Direct download
-            | Platform | File |
-            | --- | --- |
-            | Linux x86_64 | `wenchat-${{ github.ref_name }}-linux-x64` |
-            | macOS Apple Silicon | `wenchat-${{ github.ref_name }}-darwin-arm64` |
-            | Windows x64 | `wenchat-${{ github.ref_name }}-windows-x64.exe` |
-
-            ### Upgrade an existing install
-            ```sh
-            wenchat upgrade
-            ```
-
-            ## First-run note (macOS / Windows)
-            Unsigned binaries trigger a one-time system prompt. Click through
-            it once; subsequent runs are silent. (No Apple Developer ID or
-            code-signing certificate is required for a CLI tool.)
+          body: ${{ steps.notes.outputs.body }}
