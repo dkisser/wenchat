@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-08-18
+
 ### Added
 
 - **Fuzzy file picker for `/file`.** Typing `/file <partial>` now opens an
