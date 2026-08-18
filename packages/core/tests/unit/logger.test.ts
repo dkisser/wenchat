@@ -116,4 +116,17 @@ describe("initLogger / getLogger", () => {
 		await initLogger({ logDir: scratchDir, now });
 		expect(getLogger().level).toBe("info");
 	});
+
+	it("reset ends the destination, draining buffered writes without an explicit flush", async () => {
+		const now = new Date(2026, 7, 17, 10, 0);
+		const logger = await initLogger({ logDir: scratchDir, now });
+		logger.warn("buffered line");
+		// No logger.flush() — end() on the sonic-boom destination must drain
+		// the buffer before releasing the fd (same path midnight rollover uses).
+		_resetLoggerForTests();
+		await new Promise((resolve) => setTimeout(resolve, 100));
+
+		const content = await readFile(join(scratchDir, "wenchat-2026-08-17.log"), "utf8");
+		expect(content).toContain("buffered line");
+	});
 });

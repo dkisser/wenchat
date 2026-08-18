@@ -95,6 +95,15 @@ export async function pruneOldLogs(opts?: {
 let current: Logger = pino({ enabled: false });
 let midnightTimer: NodeJS.Timeout | undefined;
 
+// The sonic-boom destination behind `current`, when it is a file logger.
+// Tracked separately because a pino Logger doesn't expose its stream, and
+// the stream is what must be flushSync'd on exit and end()ed on rollover
+// (otherwise each midnight leaks one fd and the tail of the log is lost
+// on a normal process exit).
+type FileDestination = ReturnType<typeof pino.destination>;
+let currentDestination: FileDestination | undefined;
+let exitHookInstalled = false;
+
 export type InitLoggerOptions = {
 	level?: string;
 	/** Override the log directory (tests). Defaults to `<workspaceRoot>/logs`. */
@@ -114,18 +123,56 @@ export async function initLogger(opts?: InitLoggerOptions): Promise<Logger> {
 	const level = opts?.level ?? process.env.WENCHAT_LOG_LEVEL ?? "info";
 	const now = opts?.now ?? new Date();
 	await pruneOldLogs({ logDir, now });
-	current = createFileLogger(logDir, level, now);
+	const next = createFileLogger(logDir, level, now);
+	current = next.logger;
+	currentDestination = next.destination;
+	installExitFlush();
 	armMidnightRollover(logDir, level, now);
 	return current;
 }
 
-function createFileLogger(logDir: string, level: string, now: Date): Logger {
+function createFileLogger(
+	logDir: string,
+	level: string,
+	now: Date,
+): { logger: Logger; destination: FileDestination } {
 	const destination = pino.destination({
 		dest: join(logDir, `wenchat-${formatLogDate(now)}.log`),
 		mkdir: true,
 		sync: false,
 	});
-	return pino({ level }, destination);
+	return { logger: pino({ level }, destination), destination };
+}
+
+/**
+ * pino's async destination buffers writes; on a normal `process.exit` the
+ * buffer would die with the process, silently dropping the tail of the log
+ * (often the crash-relevant lines). The "exit" event only permits sync
+ * work, and sonic-boom's flushSync is exactly that. Installed once — the
+ * hook reads the CURRENT destination at exit time, so it stays correct
+ * across midnight rollovers.
+ */
+function installExitFlush(): void {
+	if (exitHookInstalled) return;
+	exitHookInstalled = true;
+	process.on("exit", () => {
+		try {
+			currentDestination?.flushSync();
+		} catch {
+			// The destination may already be broken; nothing more to do at exit.
+		}
+	});
+}
+
+/** Flush pending writes, then release the fd. Best-effort, never throws. */
+function closeDestination(destination: FileDestination | undefined): void {
+	if (!destination) return;
+	try {
+		destination.end();
+	} catch {
+		// The destination may already be broken (its file deleted) — it is
+		// being discarded either way.
+	}
 }
 
 function armMidnightRollover(logDir: string, level: string, now: Date): void {
@@ -135,8 +182,14 @@ function armMidnightRollover(logDir: string, level: string, now: Date): void {
 		void (async () => {
 			const firedAt = new Date();
 			await pruneOldLogs({ logDir, now: firedAt });
-			current.flush();
-			current = createFileLogger(logDir, level, firedAt);
+			// Swap FIRST so nothing new is written to the old file, then
+			// release the old destination — end() flushes its buffer before
+			// closing the fd, so no lines are lost and no fd leaks per day.
+			const outgoing = currentDestination;
+			const next = createFileLogger(logDir, level, firedAt);
+			current = next.logger;
+			currentDestination = next.destination;
+			closeDestination(outgoing);
 			armMidnightRollover(logDir, level, firedAt);
 		})();
 	}, nextDay.getTime() - now.getTime());
@@ -161,11 +214,8 @@ export function _resetLoggerForTests(): void {
 		clearTimeout(midnightTimer);
 		midnightTimer = undefined;
 	}
-	try {
-		current.flush();
-	} catch {
-		// The destination may already be broken (its file deleted) — it is
-		// being discarded either way.
-	}
+	const outgoing = currentDestination;
+	currentDestination = undefined;
 	current = pino({ enabled: false });
+	closeDestination(outgoing);
 }

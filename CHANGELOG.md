@@ -50,6 +50,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   now terminates the session (exactly one terminal state), frees the UI to
   reconnect, and a failed transfer can be redialed without restarting.
 
+- **Daily log rotation no longer leaks a file descriptor per day, and
+  the log tail survives a normal exit.** Midnight rollover now `end()`s
+  the previous day's pino destination (draining its buffer before closing
+  the fd), and a process-exit hook `flushSync`s the async destination so
+  the last lines — often the crash-relevant ones — are no longer lost.
+
 ### Changed
 
 - **Wire format for file transfer is now binary-framed.** Text, ping, and
