@@ -88,12 +88,14 @@ jobs:
       - name: Read release notes
         id: notes
         run: |
-          if [ -f "release-notes/${{ github.ref_name }}.md" ]; then
+          # Release notes files are named without the leading 'v' (e.g. 0.1.6.md).
+          notes_path="release-notes/${GITHUB_REF_NAME#v}.md"
+          if [ -f "$notes_path" ]; then
             {
               echo "body<<EOF"
               echo "## What's new in ${{ github.ref_name }}"
               echo ""
-              cat "release-notes/${{ github.ref_name }}.md"
+              cat "$notes_path"
               echo ""
               echo "---"
               echo ""
