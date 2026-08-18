@@ -36,12 +36,34 @@ describe("StatusBar", () => {
 	});
 
 	it("appends a hint after the status word when one is given", () => {
-		const { lastFrame } = render(<StatusBar status="offline" hint="Pick a bind address" />);
+		const { lastFrame } = render(
+			<StatusBar status="offline" hint="Pick a bind address" version="dev" />,
+		);
 		const frame = lastFrame() ?? "";
 		expect(frame).toContain("Offline");
 		expect(frame).toContain("Pick a bind address");
-		// Still one row — the hint shares the status line rather than adding one.
+		expect(frame).toContain("dev");
+		// Still one row — the hint and version share the status line.
 		expect(frame.split("\n").length).toBe(1);
+	});
+
+	it("renders the version when provided", () => {
+		const { lastFrame } = render(
+			<Box flexDirection="column" width={80}>
+				<StatusBar status="offline" version="v0.1.3" />
+			</Box>,
+		);
+		expect(lastFrame()).toContain("v0.1.3");
+	});
+
+	it("omits the version segment when version is undefined", () => {
+		const { lastFrame } = render(
+			<Box flexDirection="column" width={80}>
+				<StatusBar status="offline" />
+			</Box>,
+		);
+		expect(lastFrame()).not.toContain("v0.");
+		expect(lastFrame()).not.toContain("dev");
 	});
 
 	it("renders without a border so it costs only one row", () => {

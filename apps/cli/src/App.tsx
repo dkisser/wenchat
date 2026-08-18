@@ -684,6 +684,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 						mouseEnabled={mouseEnabled}
 						hint="Pick a bind address"
 						toast={toast}
+						version={getCurrentVersion()}
 					/>
 				</Box>
 				<HostPicker
@@ -725,6 +726,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 						peerEndpoint={peerEndpoint}
 						mouseEnabled={mouseEnabled}
 						toast={toast}
+						version={getCurrentVersion()}
 					/>
 				)}
 			</Box>
