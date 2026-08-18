@@ -171,13 +171,13 @@ bun install
 在终端 A：
 
 ```bash
-bun run cli alice
+bun run cli start alice
 ```
 
 在终端 B：
 
 ```bash
-bun run cli bob
+bun run cli start bob
 ```
 
 无需配置即可看到对方出现在 peer 列表中，`↑/↓ + Enter` 连接即可开始聊天。
@@ -201,10 +201,10 @@ bun run cli bob
 也可直接传地址跳过选择：
 
 ```bash
-bun run cli alice 9001 192.168.1.42
+bun run cli start alice 9001 192.168.1.42
 ```
 
-输出被重定向时（`bun run cli alice > out.log`）自动沿用检测到的局域网 IPv4，不会弹出选择器。
+输出被重定向时（`bun run cli start alice > out.log`）自动沿用检测到的局域网 IPv4，不会弹出选择器。
 
 ## Slash 命令
 
@@ -261,20 +261,24 @@ wenchat/
 
 ## 配置
 
-CLI 仅通过位置参数配置，**不读环境变量**。
+CLI 通过 `start` 子命令配置，**不读环境变量**。
 
 ```bash
-bun run cli <nickname> [signalingPort] [signalingHost]
+bun run cli start [options] [nickname] [signalingPort] [signalingHost]
+bun run cli start --name <nickname> --port <port> --host <host>
 ```
 
 | 参数 | 说明 | 默认 |
 | --- | --- | --- |
-| `nickname` | mDNS TXT 字段中的展示名（不会修改本机主机名） | `user-<random>` |
+| `nickname` | mDNS TXT 字段中的展示名（不会修改本机主机名） | `hostname` |
 | `signalingPort` | 信令 HTTP 端口（`0` = 操作系统分配） | `0` |
 | `signalingHost` | 显式绑定地址（交互式启动时省略 → 弹出选择器） | — |
 
-可选 flag：
+`start` 选项：
 
+- `-n, --name <name>` —— 展示名
+- `-p, --port <port>` —— 信令端口
+- `--host <host>` —— 显式绑定地址
 - `--no-mouse` —— 禁用 SGR 鼠标跟踪（终端不支持 SGR 时使用）
 
 剪贴板行为：先尝试原生工具（`pbcopy` / `clip.exe` / `wl-copy` / `xclip` / `xsel`），都没有就降级到 OSC 52 直写 stdout（iTerm2 需要在 Preferences → Advanced 打开 "Allow clipboard read/write from shell"）。

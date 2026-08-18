@@ -205,13 +205,13 @@ bun install
 In terminal A:
 
 ```bash
-bun run cli alice
+bun run cli start alice
 ```
 
 In terminal B:
 
 ```bash
-bun run cli bob
+bun run cli start bob
 ```
 
 The peer appears in the list immediately — `↑/↓ + Enter` to connect
@@ -241,10 +241,10 @@ startup screen lists every bindable address:
 You can also skip the picker by passing the address directly:
 
 ```bash
-bun run cli alice 9001 192.168.1.42
+bun run cli start alice 9001 192.168.1.42
 ```
 
-When stdout is redirected (`bun run cli alice > out.log`) the picker
+When stdout is redirected (`bun run cli start alice > out.log`) the picker
 is suppressed and the detected LAN IPv4 is used automatically.
 
 ## Slash Commands
@@ -309,21 +309,25 @@ wenchat/
 
 ## Configuration
 
-The CLI is configured purely through positional arguments — **no
+The CLI is configured through the `start` subcommand — **no
 environment variables are read**.
 
 ```bash
-bun run cli <nickname> [signalingPort] [signalingHost]
+bun run cli start [options] [nickname] [signalingPort] [signalingHost]
+bun run cli start --name <nickname> --port <port> --host <host>
 ```
 
 | Argument | Description | Default |
 | --- | --- | --- |
-| `nickname` | Display name carried in the mDNS TXT record (does not modify your system hostname) | `user-<random>` |
+| `nickname` | Display name carried in the mDNS TXT record (does not modify your system hostname) | `hostname` |
 | `signalingPort` | Signaling HTTP port (`0` = OS-assigned) | `0` |
 | `signalingHost` | Explicit bind address (omit on an interactive run to open the picker) | — |
 
-Optional flag:
+Start options:
 
+- `-n, --name <name>` — display name
+- `-p, --port <port>` — signaling port
+- `--host <host>` — explicit bind address
 - `--no-mouse` — disable SGR mouse tracking (for terminals that don't
   support SGR)
 

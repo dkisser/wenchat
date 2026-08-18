@@ -22,7 +22,8 @@ Package-specific gotchas load on demand when editing those paths:
 ## Canonical commands
 
 - `bun install` — install (pinned exact versions per `bunfig.toml`; lockfile is intentionally untracked, see `.gitignore`); never introduce npm/yarn/pnpm lockfiles
-- `bun run cli <nickname> [signalingPort] [signalingHost]` — run the terminal app
+- `bun run cli start [nickname] [signalingPort] [signalingHost]` — run the terminal app
+  (also accepts `bun run cli start --name <nickname> --port <port> --host <host>`)
 - `bun test` — run all tests (Bun test runner; imports `from "bun:test"`)
 - `bun run build` — `bun run --filter '*' build` (per-package `tsc -p tsconfig.json`, output to `dist/`); also produces `apps/cli/dist/main.js`, which `package:cli` reads as the entry
 - `bun run lint` — `biome check .`
@@ -41,8 +42,9 @@ There is no `bun run check`; `biome` only lints, it does not typecheck.
 
 ## CLI subcommands
 
-`apps/cli/src/main.tsx` dispatches subcommands **before** the TUI safety net / alt-screen / React mount, so `wenchat version`, `wenchat help`, and `wenchat upgrade` never touch the terminal:
+`apps/cli/src/main.tsx` dispatches subcommands **before** the TUI safety net / alt-screen / React mount, so `wenchat start`, `wenchat version`, `wenchat help`, and `wenchat upgrade` never touch the terminal:
 
+- `start [nickname] [signalingPort] [signalingHost]` / `start --name <nickname> --port <port> --host <host>` — launch the TUI chat session. Bare `wenchat <nickname> ...` is no longer accepted; the `start` subcommand is required.
 - `version` / `--version` / `-v` — print version, exit 0. In dev (`bun run cli`) the version reads as `"dev"`; in a packed binary it reads from `globalThis.__WENCHAT_VERSION__`, which `package:cli` injects via esbuild `define`.
 - `help` / `--help` / `-h` — print help text, exit 0 (string lives in `apps/cli/src/updater.ts` next to the other CLI-facing constants).
 - `upgrade` / `update` [`--check-only`] — query the GitHub Releases API for `dkisser/wenchat`, find the asset for the current platform via `detectTarget()` (matrix must match `.github/workflows/release.yml` exactly: linux-x64 / darwin-arm64 / windows-x64), download to a temp file, then atomically `rename(2)` over the running executable. POSIX works because a running ELF can be renamed; Windows stages the file and prints a one-line manual swap instruction. Exit codes: `0` = success / up-to-date, `1` = network or IO error, `2` = unsupported platform, `3` = no asset for this platform.

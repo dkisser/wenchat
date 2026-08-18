@@ -208,7 +208,7 @@ export async function upgradeCli(opts: UpgradeOpts = {}): Promise<number> {
 export const HELP_TEXT = `wenchat - LAN-only P2P terminal chat
 
 Usage:
-  wenchat [nickname] [signalingPort] [signalingHost]
+  wenchat start [options] [nickname] [signalingPort] [signalingHost]
   wenchat <subcommand> [options]
 
 Subcommands:
@@ -217,14 +217,17 @@ Subcommands:
   upgrade --check-only Check for updates without installing
   help                 Print this help and exit
 
-Options:
-  --no-mouse           Disable mouse tracking in the TUI
+Start options:
+  -n, --name <name>    Display name (default: hostname)
+  -p, --port <port>    Signaling port (default: 0, OS-assigned)
+      --host <host>    Bind host (omit for interactive picker)
+      --no-mouse       Disable mouse tracking in the TUI
 
 Examples:
-  wenchat alice                        Start a chat session as 'alice'
-  wenchat alice 9000                   Use signaling port 9000
-  wenchat alice 0 192.168.1.100        Bind to a specific host
-  wenchat upgrade                      Upgrade to the latest version
+  wenchat start alice
+  wenchat start --name alice --port 9000 --host 192.168.1.100
+  wenchat start alice 9000 192.168.1.100
+  wenchat upgrade
 
 Repository: https://github.com/dkisser/wenchat
 `;

@@ -113,7 +113,9 @@ describe("App startup host picker", () => {
 	it("shows the picker when no host was supplied", () => {
 		spyOnNetworkStarts();
 		instance = render(<App displayName="alice" signalingPort={19001} />);
-		expect(instance.lastFrame()).toContain("Select bind address");
+		const frame = instance.lastFrame() ?? "";
+		expect(frame).toContain("Select bind address");
+		expect(frame).toContain("dev");
 	});
 
 	it("binds nothing while the picker is still on screen", async () => {

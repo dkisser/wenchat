@@ -22,11 +22,20 @@ A recent regression reintroduced `exitOnCtrlC` and produced a frozen terminal on
 
 ## CLI args semantics
 
-- `args[0]` — display name (defaults to `user-<random>`)
-- `args[1]` — signaling port (`0` means OS-assigned)
-- `args[2]` — signaling host override. Given explicitly, it is used verbatim and the app boots straight into the peer list. Omitted, the resolution splits on TTY:
-  - **interactive** (stdout *and* stdin are TTYs) → `main.tsx` passes `signalingHost: undefined` and `App` opens on the `HostPicker` startup phase; the user arrows to an address and presses Enter
-  - **non-interactive** (piped/redirected) → falls back to `getLanHost()` silently, exactly as before, since nobody is there to answer a prompt
+The CLI now requires the explicit `start` subcommand. `parseCliArgs` in
+`apps/cli/src/parseArgs.ts` turns argv into a `CliAction`; `main.tsx` only
+reaches the TUI for `action.kind === "start"`.
+
+- `wenchat start [nickname] [signalingPort] [signalingHost]` — positional form
+- `wenchat start --name <nickname> --port <port> --host <host>` — flag form
+- `--no-mouse` can be appended to either form to disable mouse tracking
+- `nickname` defaults to `os.hostname()`, then `"user"`
+- `signalingPort` defaults to `0` (OS-assigned)
+- `signalingHost` omitted on an interactive run opens the `HostPicker`; omitted
+  on a non-interactive run falls back to `getLanHost()`
+
+Bare `wenchat <nickname> ...` is **not** accepted anymore and prints an
+"Unknown subcommand" error.
 
 Never default to `127.0.0.1` — loopback cannot be reached by LAN peers.
 

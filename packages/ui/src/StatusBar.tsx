@@ -49,6 +49,8 @@ export type StatusBarProps = {
 	 * and never animates or expires the value on its own.
 	 */
 	toast?: StatusBarToast | null;
+	/** CLI version string shown after the status/hint area (e.g. "v0.1.0" or "dev"). */
+	version?: string;
 };
 
 /**
@@ -64,6 +66,7 @@ export function StatusBar({
 	mouseEnabled = true,
 	hint,
 	toast = null,
+	version,
 }: StatusBarProps) {
 	const statusText = formatStatusText(status, peerName, peerEndpoint);
 	const color = statusColor(status);
@@ -76,6 +79,7 @@ export function StatusBar({
 				{!mouseEnabled && (
 					<Text color="gray">{"  • Select mode (Ctrl+T or /mouse to scroll)"}</Text>
 				)}
+				{version && <Text color="gray">{`  • ${version}`}</Text>}
 			</Box>
 			{toast && <Text color={toast.tone === "error" ? "red" : "gray"}>{toast.text}</Text>}
 		</Box>
