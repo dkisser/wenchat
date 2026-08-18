@@ -82,6 +82,39 @@ describe("DataTransport", () => {
 		expect(messages.length).toBe(0);
 	});
 
+	it("a throwing message listener does not starve the rest of the fan-out", () => {
+		const received: unknown[] = [];
+		const fakeChannel = makeFakeChannel();
+		const transport = new DataTransport(fakeChannel as never);
+		transport.onMessage(() => {
+			throw new Error("listener bug");
+		});
+		transport.onMessage((msg) => received.push(msg));
+
+		const encoded = new TextEncoder().encode(
+			JSON.stringify({ type: "text", id: "1", timestamp: 0, payload: { text: "hi" } }),
+		);
+		// The throw must be contained — not propagated into the emitter,
+		// and not skipping the second listener.
+		expect(() => fakeChannel.onmessage?.({ data: encoded })).not.toThrow();
+		expect(received.length).toBe(1);
+	});
+
+	it("a throwing close listener does not starve the rest of the fan-out", () => {
+		const fakeChannel = makeFakeChannel();
+		const transport = new DataTransport(fakeChannel as never);
+		let closes = 0;
+		transport.onClose(() => {
+			throw new Error("listener bug");
+		});
+		transport.onClose(() => {
+			closes++;
+		});
+
+		expect(() => fakeChannel.close()).not.toThrow();
+		expect(closes).toBe(1);
+	});
+
 	it("sendBinary writes the frame verbatim", () => {
 		const fakeChannel = makeFakeChannel();
 		const transport = new DataTransport(fakeChannel as never);

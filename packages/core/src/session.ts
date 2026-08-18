@@ -12,6 +12,10 @@ import { DataTransport } from "./transport";
 
 const DATA_CHANNEL_LABEL = "wenchat";
 
+function errorText(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
 export type InitiateOptions = {
 	signaling: SignalingServer;
 	localHost: string;
@@ -270,7 +274,11 @@ export class Session {
 				return;
 			}
 			for (const listener of this.messageListeners) {
-				listener(message);
+				try {
+					listener(message);
+				} catch (err) {
+					getLogger().error({ err: errorText(err) }, "message listener threw");
+				}
 			}
 		});
 		// A channel that dies WITHOUT the pc following (e.g. a failed file
@@ -307,6 +315,16 @@ export class Session {
 		}
 	}
 
+	private notifyStateListeners(state: string): void {
+		for (const listener of this.stateListeners) {
+			try {
+				listener(state);
+			} catch (err) {
+				getLogger().error({ err: errorText(err) }, "state listener threw");
+			}
+		}
+	}
+
 	private notifyStateChange(state: string): void {
 		if (state === "connected") {
 			this.heartbeat?.start();
@@ -329,9 +347,7 @@ export class Session {
 		} else {
 			getLogger().info({ state }, "connection state");
 		}
-		for (const listener of this.stateListeners) {
-			listener(state);
-		}
+		this.notifyStateListeners(state);
 	}
 
 	private stopHeartbeat(): void {
@@ -352,8 +368,6 @@ export class Session {
 		} catch {
 			// pc.close() is idempotent — ignore double-close.
 		}
-		for (const listener of this.stateListeners) {
-			listener("disconnected");
-		}
+		this.notifyStateListeners("disconnected");
 	}
 }

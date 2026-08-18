@@ -57,6 +57,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   peer accumulated them. Both `initiate` and `accept` now tear the pc
   down before rethrowing.
 
+- **One crashing event listener no longer starves the others.** Message,
+  state, close, and incoming-offer fan-outs (transport → session → peer)
+  now guard each listener individually and log the failure, instead of
+  letting a single throwing callback abort the loop and silently drop the
+  event for everyone downstream. A throwing listener is also no longer
+  mislogged as an "undecodable message".
+
 - **Daily log rotation no longer leaks a file descriptor per day, and
   the log tail survives a normal exit.** Midnight rollover now `end()`s
   the previous day's pino destination (draining its buffer before closing

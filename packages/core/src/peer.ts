@@ -1,7 +1,12 @@
 import type { Message } from "@wenchat/protocol";
 import type { SendFileOptions, SendFileResult } from "./fileTransfer";
+import { getLogger } from "./logger";
 import { Session } from "./session";
 import { type IceCandidatePayload, type SdpPayload, SignalingServer } from "./signaling";
+
+function errorText(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
 
 /**
  * Information surfaced to app code when a remote peer sends an offer
@@ -91,7 +96,13 @@ export class PeerConnection {
 				signalingPort: offer.signalingPort ?? 0,
 			};
 			for (const listener of this.incomingListeners) {
-				listener(info);
+				try {
+					listener(info);
+				} catch (err) {
+					// A throwing app listener must not abort the accept — the
+					// remote peer is still waiting for its answer.
+					getLogger().error({ err: errorText(err) }, "incoming listener threw");
+				}
 			}
 
 			const newSession = await Session.accept({
@@ -246,12 +257,20 @@ export class PeerConnection {
 		this.sessionUnsubscribers.push(
 			newSession.onMessage((message) => {
 				for (const listener of this.messageListeners) {
-					listener(message);
+					try {
+						listener(message);
+					} catch (err) {
+						getLogger().error({ err: errorText(err) }, "message listener threw");
+					}
 				}
 			}),
 			newSession.onStateChange((state) => {
 				for (const listener of this.stateListeners) {
-					listener(state);
+					try {
+						listener(state);
+					} catch (err) {
+						getLogger().error({ err: errorText(err) }, "state listener threw");
+					}
 				}
 			}),
 		);

@@ -11,6 +11,10 @@ import { getLogger } from "./logger";
 
 const DEFAULT_DRAIN_POLL_MS = 5;
 
+function errorText(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
 export class DataTransport {
 	private channel: RTCDataChannel;
 	private messageListeners: Set<(message: Message) => void> = new Set();
@@ -23,27 +27,25 @@ export class DataTransport {
 		this.channel = channel;
 		this.channel.onmessage = (event) => {
 			const data = event.data as Buffer | Uint8Array | ArrayBuffer | string;
+			let message: Message;
 			try {
 				if (typeof data === "string") {
-					this.notifyListeners(decode(new TextEncoder().encode(data)));
-					return;
+					message = decode(new TextEncoder().encode(data));
+				} else {
+					const buffer = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
+					message = isFileChunkFrame(buffer) ? synthesizeFileChunk(buffer) : decode(buffer);
 				}
-				const buffer = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
-				if (isFileChunkFrame(buffer)) {
-					this.notifyListeners(synthesizeFileChunk(buffer));
-					return;
-				}
-				this.notifyListeners(decode(buffer));
 			} catch (err) {
 				// A malformed frame — or a message from a mismatched protocol
 				// version — must not propagate into werift's emitter (it would
 				// surface as an uncaught exception and kill the process).
 				// Log and drop; the connection stays up.
-				getLogger().warn(
-					{ err: err instanceof Error ? err.message : String(err) },
-					"dropping undecodable message",
-				);
+				getLogger().warn({ err: errorText(err) }, "dropping undecodable message");
+				return;
 			}
+			// Fan-out lives OUTSIDE the decode try/catch: a throwing listener
+			// is a bug in listener code, not an undecodable message.
+			this.notifyListeners(message);
 		};
 		this.channel.onclose = () => {
 			this.notifyClose();
@@ -137,14 +139,24 @@ export class DataTransport {
 	private notifyClose(): void {
 		if (this.closeNotified) return;
 		this.closeNotified = true;
+		// One throwing listener must not starve the rest of the fan-out —
+		// each gets its own guard, here and in notifyListeners.
 		for (const listener of this.closeListeners) {
-			listener();
+			try {
+				listener();
+			} catch (err) {
+				getLogger().error({ err: errorText(err) }, "close listener threw");
+			}
 		}
 	}
 
 	private notifyListeners(message: Message): void {
 		for (const listener of this.messageListeners) {
-			listener(message);
+			try {
+				listener(message);
+			} catch (err) {
+				getLogger().error({ err: errorText(err) }, "message listener threw");
+			}
 		}
 	}
 }
