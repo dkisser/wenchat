@@ -7,6 +7,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-18
+
+### Fixed
+
+- **Logger test cleanup no longer leaks unhandled errors.** When
+  `_resetLoggerForTests()` closed the process-wide pino destination, the
+  underlying sonic-boom stream could still be opening the file
+  asynchronously; deleting the test temp dir before that open completed
+  emitted an unhandled `ENOENT` error between tests and failed CI on Linux.
+  The reset now attaches a no-op error listener to the outgoing destination
+  before closing it, so cleanup races are absorbed.
+
+### Changed
+
+- **GitHub Release body now includes the generated release notes.** The
+  `release.yml` publish job reads `release-notes/vX.Y.Z.md` and prepends a
+  "What's new" section above the install instructions, so future releases
+  ship with both the changelog summary and the download/upgrade steps.
+
 ## [0.1.5] - 2026-08-18
 
 ### Added
