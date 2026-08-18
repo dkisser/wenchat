@@ -75,6 +75,7 @@ describe("core integration: file transfer", () => {
 			onEvent: (event) => bobEvents.push(event),
 		});
 		bob.onMessage((message) => bobReceiver.handleMessage(message));
+		bob.onFileChunk((chunk) => bobReceiver.handleChunk(chunk));
 	});
 
 	afterEach(async () => {

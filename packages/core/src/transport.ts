@@ -1,10 +1,9 @@
 import {
-	type FileChunkMessage,
+	type FileChunkFramePayload,
 	type Message,
-	decode,
-	decodeFileChunkFrame,
+	type WirePacket,
+	decodeWirePacket,
 	encode,
-	isFileChunkFrame,
 } from "@wenchat/protocol";
 import type { RTCDataChannel } from "werift";
 import { getLogger } from "./logger";
@@ -18,6 +17,7 @@ function errorText(err: unknown): string {
 export class DataTransport {
 	private channel: RTCDataChannel;
 	private messageListeners: Set<(message: Message) => void> = new Set();
+	private chunkListeners: Set<(chunk: FileChunkFramePayload) => void> = new Set();
 	private closeListeners: Set<() => void> = new Set();
 	// werift can surface a close twice (onclose callback AND the "close"
 	// emit both fire from setReadyState) — listeners see it once.
@@ -27,14 +27,11 @@ export class DataTransport {
 		this.channel = channel;
 		this.channel.onmessage = (event) => {
 			const data = event.data as Buffer | Uint8Array | ArrayBuffer | string;
-			let message: Message;
+			const buffer =
+				typeof data === "string" ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : data;
+			let packet: WirePacket;
 			try {
-				if (typeof data === "string") {
-					message = decode(new TextEncoder().encode(data));
-				} else {
-					const buffer = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
-					message = isFileChunkFrame(buffer) ? synthesizeFileChunk(buffer) : decode(buffer);
-				}
+				packet = decodeWirePacket(buffer);
 			} catch (err) {
 				// A malformed frame — or a message from a mismatched protocol
 				// version — must not propagate into werift's emitter (it would
@@ -45,7 +42,11 @@ export class DataTransport {
 			}
 			// Fan-out lives OUTSIDE the decode try/catch: a throwing listener
 			// is a bug in listener code, not an undecodable message.
-			this.notifyListeners(message);
+			if (packet.kind === "file-chunk") {
+				this.notifyChunkListeners(packet.chunk);
+			} else {
+				this.notifyMessageListeners(packet.message);
+			}
 		};
 		this.channel.onclose = () => {
 			this.notifyClose();
@@ -121,6 +122,18 @@ export class DataTransport {
 	}
 
 	/**
+	 * Fires per inbound file-chunk frame with the decoded frame payload —
+	 * kept apart from `onMessage` because chunks never carry the
+	 * id/timestamp envelope a `Message` implies.
+	 */
+	onFileChunk(callback: (chunk: FileChunkFramePayload) => void): () => void {
+		this.chunkListeners.add(callback);
+		return () => {
+			this.chunkListeners.delete(callback);
+		};
+	}
+
+	/**
 	 * Fires when the underlying channel reaches "closed" — including a
 	 * REMOTE close (SCTP reconfig propagates it), which is how a peer that
 	 * lost only its data channel stops looking "online".
@@ -140,7 +153,7 @@ export class DataTransport {
 		if (this.closeNotified) return;
 		this.closeNotified = true;
 		// One throwing listener must not starve the rest of the fan-out —
-		// each gets its own guard, here and in notifyListeners.
+		// each gets its own guard, here and in the other notify* methods.
 		for (const listener of this.closeListeners) {
 			try {
 				listener();
@@ -150,7 +163,7 @@ export class DataTransport {
 		}
 	}
 
-	private notifyListeners(message: Message): void {
+	private notifyMessageListeners(message: Message): void {
 		for (const listener of this.messageListeners) {
 			try {
 				listener(message);
@@ -159,14 +172,14 @@ export class DataTransport {
 			}
 		}
 	}
-}
 
-function synthesizeFileChunk(frame: Uint8Array): FileChunkMessage {
-	const { transferId, index, data } = decodeFileChunkFrame(frame);
-	return {
-		type: "file-chunk",
-		id: crypto.randomUUID(),
-		timestamp: Date.now(),
-		payload: { transferId, index, data },
-	};
+	private notifyChunkListeners(chunk: FileChunkFramePayload): void {
+		for (const listener of this.chunkListeners) {
+			try {
+				listener(chunk);
+			} catch (err) {
+				getLogger().error({ err: errorText(err) }, "file-chunk listener threw");
+			}
+		}
+	}
 }

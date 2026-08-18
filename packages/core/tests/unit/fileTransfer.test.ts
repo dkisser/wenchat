@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	type FileChunkMessage,
+	type FileChunkFramePayload,
 	type Message,
 	decodeFileChunkFrame,
 	encodeFileChunkFrame,
@@ -54,13 +54,8 @@ function makeFakeChannel() {
 	};
 }
 
-function chunkMessage(transferId: string, index: number, data: Uint8Array): FileChunkMessage {
-	return {
-		type: "file-chunk",
-		id: `chunk-${index}`,
-		timestamp: 0,
-		payload: { transferId, index, data },
-	};
+function chunkPayload(transferId: string, index: number, data: Uint8Array): FileChunkFramePayload {
+	return { transferId, index, data };
 }
 
 function startMessage(transferId: string, fileName: string, fileSize: number): Message {
@@ -206,8 +201,8 @@ describe("FileReceiver", () => {
 				chunkSize: FILE_CHUNK_SIZE,
 			},
 		});
-		receiver.handleMessage(chunkMessage(transferId, 0, content.subarray(0, FILE_CHUNK_SIZE)));
-		receiver.handleMessage(chunkMessage(transferId, 1, content.subarray(FILE_CHUNK_SIZE)));
+		receiver.handleChunk(chunkPayload(transferId, 0, content.subarray(0, FILE_CHUNK_SIZE)));
+		receiver.handleChunk(chunkPayload(transferId, 1, content.subarray(FILE_CHUNK_SIZE)));
 		receiver.handleMessage({
 			type: "file-end",
 			id: "e",
@@ -237,7 +232,7 @@ describe("FileReceiver", () => {
 			timestamp: 0,
 			payload: { transferId, fileName: "dup.bin", fileSize: 3, chunkSize: FILE_CHUNK_SIZE },
 		});
-		receiver.handleMessage(chunkMessage(transferId, 0, content));
+		receiver.handleChunk(chunkPayload(transferId, 0, content));
 		receiver.handleMessage({
 			type: "file-end",
 			id: "e",
@@ -262,7 +257,7 @@ describe("FileReceiver", () => {
 			timestamp: 0,
 			payload: { transferId, fileName: "bad.bin", fileSize: 3, chunkSize: FILE_CHUNK_SIZE },
 		});
-		receiver.handleMessage(chunkMessage(transferId, 0, new Uint8Array([1, 2, 3])));
+		receiver.handleChunk(chunkPayload(transferId, 0, new Uint8Array([1, 2, 3])));
 		receiver.handleMessage({
 			type: "file-end",
 			id: "e",
@@ -291,7 +286,7 @@ describe("FileReceiver", () => {
 			timestamp: 0,
 			payload: { transferId, fileName: "ooo.bin", fileSize: 6, chunkSize: FILE_CHUNK_SIZE },
 		});
-		receiver.handleMessage(chunkMessage(transferId, 1, new Uint8Array([1, 2, 3])));
+		receiver.handleChunk(chunkPayload(transferId, 1, new Uint8Array([1, 2, 3])));
 		await receiver.dispose();
 
 		const failed = events.find((e) => e.kind === "failed");
@@ -338,7 +333,7 @@ describe("FileReceiver", () => {
 			timestamp: 0,
 			payload: { transferId, fileName: "partial.bin", fileSize: 100, chunkSize: FILE_CHUNK_SIZE },
 		});
-		receiver.handleMessage(chunkMessage(transferId, 0, new Uint8Array([1, 2, 3])));
+		receiver.handleChunk(chunkPayload(transferId, 0, new Uint8Array([1, 2, 3])));
 		await receiver.dispose();
 
 		const failed = events.find((e) => e.kind === "failed");
@@ -376,7 +371,7 @@ describe("FileReceiver", () => {
 	it("drops chunks for unknown transfers", async () => {
 		const { events, sink } = collectEvents();
 		const receiver = new FileReceiver({ downloadDir: scratchDir, onEvent: sink });
-		receiver.handleMessage(chunkMessage(crypto.randomUUID(), 0, new Uint8Array([1])));
+		receiver.handleChunk(chunkPayload(crypto.randomUUID(), 0, new Uint8Array([1])));
 		await receiver.dispose();
 		expect(events.length).toBe(0);
 	});
@@ -387,7 +382,7 @@ describe("FileReceiver", () => {
 		const transferId = crypto.randomUUID();
 
 		receiver.handleMessage(startMessage(transferId, "over.bin", 3));
-		receiver.handleMessage(chunkMessage(transferId, 0, new Uint8Array([1, 2, 3, 4])));
+		receiver.handleChunk(chunkPayload(transferId, 0, new Uint8Array([1, 2, 3, 4])));
 		await receiver.dispose();
 
 		const failed = events.find((e) => e.kind === "failed");
@@ -405,7 +400,7 @@ describe("FileReceiver", () => {
 		const partial = new Uint8Array([1, 2, 3]);
 
 		receiver.handleMessage(startMessage(transferId, "short.bin", 6));
-		receiver.handleMessage(chunkMessage(transferId, 0, partial));
+		receiver.handleChunk(chunkPayload(transferId, 0, partial));
 		// The checksum covers exactly what arrived — without a byte-count check
 		// this truncated file would be renamed into place as a "success".
 		receiver.handleMessage(endMessage(transferId, sha256Hex(partial)));
@@ -444,10 +439,10 @@ describe("FileReceiver", () => {
 		const content = new Uint8Array([9, 9, 9]);
 
 		receiver.handleMessage(startMessage(transferId, "first.bin", 100));
-		receiver.handleMessage(chunkMessage(transferId, 0, new Uint8Array([1])));
+		receiver.handleChunk(chunkPayload(transferId, 0, new Uint8Array([1])));
 		// Reusing the id must not leak the first transfer's handle/temp file.
 		receiver.handleMessage(startMessage(transferId, "second.bin", 3));
-		receiver.handleMessage(chunkMessage(transferId, 0, content));
+		receiver.handleChunk(chunkPayload(transferId, 0, content));
 		receiver.handleMessage(endMessage(transferId, sha256Hex(content)));
 		await receiver.dispose();
 

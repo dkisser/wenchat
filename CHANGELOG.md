@@ -58,11 +58,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   down before rethrowing.
 
 - **One crashing event listener no longer starves the others.** Message,
-  state, close, and incoming-offer fan-outs (transport → session → peer)
-  now guard each listener individually and log the failure, instead of
-  letting a single throwing callback abort the loop and silently drop the
-  event for everyone downstream. A throwing listener is also no longer
-  mislogged as an "undecodable message".
+  file-chunk, state, and close fan-outs (transport → session → peer) now
+  guard each listener individually and log the failure, instead of letting
+  a single throwing callback abort the loop and silently drop the event
+  for everyone downstream. A throwing listener is also no longer mislogged
+  as an "undecodable message".
 
 - **Daily log rotation no longer leaks a file descriptor per day, and
   the log tail survives a normal exit.** Midnight rollover now `end()`s
@@ -71,6 +71,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   the last lines — often the crash-relevant ones — are no longer lost.
 
 ### Changed
+
+- **Inbound demux moved into `@wenchat/protocol`.** A new
+  `decodeWirePacket` adapter (next to the codec) decides whether a
+  datagram is a JSON message or a binary chunk frame, so the transport
+  layer only ships bytes. File chunks now surface as raw frame payloads
+  on a dedicated `onFileChunk` channel (transport → session → peer →
+  `FileReceiver.handleChunk`) instead of being dressed up as a synthetic
+  `Message` with an invented id/timestamp — the `FileChunkMessage` type
+  is gone from the protocol's `Message` union.
 
 - **Wire format for file transfer is now binary-framed.** Text, ping, and
   pong messages are byte-identical to previous versions, so text chat

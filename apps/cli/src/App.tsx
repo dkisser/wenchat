@@ -179,6 +179,11 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			// the streaming receiver, whose events surface as system entries.
 			fileReceiver.handleMessage(message);
 		});
+		// Chunks arrive on their own channel (binary frames demuxed by the
+		// transport) — straight into the receiver, never near React state.
+		const unsubscribeChunks = peerConnection.onFileChunk((chunk) => {
+			fileReceiver.handleChunk(chunk);
+		});
 		const unsubscribeState = peerConnection.onStateChange((state) => {
 			const peer = selectedPeerRef.current;
 			if (state === "connected") {
@@ -246,6 +251,7 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			unsubscribePeers();
 			unsubscribeIncoming();
 			unsubscribeMessage();
+			unsubscribeChunks();
 			unsubscribeState();
 			void fileReceiver.dispose();
 			discovery.stop().catch(() => {});
@@ -468,8 +474,9 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	};
 
 	// Walk messages backwards, picking the n-th text message (1-based).
-	// File-start / file-chunk / file-end / ping / pong messages do not
-	// increment the counter — only the chat surface does.
+	// The chat log only ever holds text messages — file control traffic
+	// and heartbeats feed the receiver/scheduler directly — so every
+	// entry here increments the counter.
 	const handleCopy = (arg: string) => {
 		const trimmed = arg.trim();
 		let n = 1;

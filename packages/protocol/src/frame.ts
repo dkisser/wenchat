@@ -20,6 +20,13 @@ export const FILE_CHUNK_MAGIC = 0xa1;
 export const FILE_CHUNK_VERSION = 1;
 export const FILE_CHUNK_HEADER_BYTES = 22;
 
+/** Decoded content of one binary chunk frame — the frame header fields plus payload. */
+export type FileChunkFramePayload = {
+	transferId: string;
+	index: number;
+	data: Uint8Array;
+};
+
 const UUID_HEX_LENGTH = 32;
 
 export function encodeFileChunkFrame(
@@ -42,11 +49,7 @@ export function isFileChunkFrame(buffer: Uint8Array): boolean {
 	return buffer.length >= FILE_CHUNK_HEADER_BYTES && buffer[0] === FILE_CHUNK_MAGIC;
 }
 
-export function decodeFileChunkFrame(buffer: Uint8Array): {
-	transferId: string;
-	index: number;
-	data: Uint8Array;
-} {
+export function decodeFileChunkFrame(buffer: Uint8Array): FileChunkFramePayload {
 	if (buffer.length < FILE_CHUNK_HEADER_BYTES) {
 		throw new Error(`File chunk frame too short: ${buffer.length} bytes`);
 	}

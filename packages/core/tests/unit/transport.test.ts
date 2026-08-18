@@ -49,37 +49,23 @@ describe("DataTransport", () => {
 		expect((messages[0] as { payload: { text: string } }).payload.text).toBe("hi");
 	});
 
-	it("synthesizes a file-chunk message from a binary frame", () => {
+	it("delivers a binary frame to chunk listeners, not message listeners", () => {
 		const messages: unknown[] = [];
+		const chunks: { transferId: string; index: number; data: Uint8Array }[] = [];
 		const fakeChannel = makeFakeChannel();
 		const transport = new DataTransport(fakeChannel as never);
 		transport.onMessage((msg) => messages.push(msg));
+		transport.onFileChunk((chunk) => chunks.push(chunk));
 
 		const payload = new Uint8Array([9, 8, 7]);
 		fakeChannel.onmessage?.({ data: encodeFileChunkFrame(TRANSFER_ID, 3, payload) });
 
-		expect(messages.length).toBe(1);
-		const message = messages[0] as {
-			type: string;
-			payload: { transferId: string; index: number; data: Uint8Array };
-		};
-		expect(message.type).toBe("file-chunk");
-		expect(message.payload.transferId).toBe(TRANSFER_ID);
-		expect(message.payload.index).toBe(3);
-		expect(new Uint8Array(message.payload.data)).toEqual(payload);
-	});
-
-	it("drops undecodable messages instead of throwing into the emitter", () => {
-		const messages: unknown[] = [];
-		const fakeChannel = makeFakeChannel();
-		const transport = new DataTransport(fakeChannel as never);
-		transport.onMessage((msg) => messages.push(msg));
-
-		// Not a binary frame (wrong magic) and not valid JSON either.
-		expect(() =>
-			fakeChannel.onmessage?.({ data: new Uint8Array([0xff, 0x00, 0x01]) }),
-		).not.toThrow();
 		expect(messages.length).toBe(0);
+		expect(chunks.length).toBe(1);
+		const chunk = chunks[0] as (typeof chunks)[number];
+		expect(chunk.transferId).toBe(TRANSFER_ID);
+		expect(chunk.index).toBe(3);
+		expect(new Uint8Array(chunk.data)).toEqual(payload);
 	});
 
 	it("a throwing message listener does not starve the rest of the fan-out", () => {
@@ -100,6 +86,20 @@ describe("DataTransport", () => {
 		expect(received.length).toBe(1);
 	});
 
+	it("a throwing chunk listener does not starve the rest of the fan-out", () => {
+		const received: unknown[] = [];
+		const fakeChannel = makeFakeChannel();
+		const transport = new DataTransport(fakeChannel as never);
+		transport.onFileChunk(() => {
+			throw new Error("listener bug");
+		});
+		transport.onFileChunk((chunk) => received.push(chunk));
+
+		const frame = encodeFileChunkFrame(TRANSFER_ID, 0, new Uint8Array([1]));
+		expect(() => fakeChannel.onmessage?.({ data: frame })).not.toThrow();
+		expect(received.length).toBe(1);
+	});
+
 	it("a throwing close listener does not starve the rest of the fan-out", () => {
 		const fakeChannel = makeFakeChannel();
 		const transport = new DataTransport(fakeChannel as never);
@@ -113,6 +113,19 @@ describe("DataTransport", () => {
 
 		expect(() => fakeChannel.close()).not.toThrow();
 		expect(closes).toBe(1);
+	});
+
+	it("drops undecodable messages instead of throwing into the emitter", () => {
+		const messages: unknown[] = [];
+		const fakeChannel = makeFakeChannel();
+		const transport = new DataTransport(fakeChannel as never);
+		transport.onMessage((msg) => messages.push(msg));
+
+		// Not a binary frame (wrong magic) and not valid JSON either.
+		expect(() =>
+			fakeChannel.onmessage?.({ data: new Uint8Array([0xff, 0x00, 0x01]) }),
+		).not.toThrow();
+		expect(messages.length).toBe(0);
 	});
 
 	it("sendBinary writes the frame verbatim", () => {

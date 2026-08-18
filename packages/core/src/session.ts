@@ -1,4 +1,4 @@
-import type { Message } from "@wenchat/protocol";
+import type { FileChunkFramePayload, Message } from "@wenchat/protocol";
 import { type RTCDataChannel, RTCIceCandidate, RTCPeerConnection } from "werift";
 import {
 	type SendFileOptions,
@@ -62,6 +62,7 @@ export class Session {
 	private readonly signaling: SignalingServer;
 
 	private messageListeners: Set<(message: Message) => void> = new Set();
+	private chunkListeners: Set<(chunk: FileChunkFramePayload) => void> = new Set();
 	private stateListeners: Set<(state: string) => void> = new Set();
 
 	// The SDP answer produced by `accept()`. Read once by
@@ -175,6 +176,13 @@ export class Session {
 		};
 	}
 
+	onFileChunk(callback: (chunk: FileChunkFramePayload) => void): () => void {
+		this.chunkListeners.add(callback);
+		return () => {
+			this.chunkListeners.delete(callback);
+		};
+	}
+
 	onStateChange(callback: (state: string) => void): () => void {
 		this.stateListeners.add(callback);
 		return () => {
@@ -278,6 +286,15 @@ export class Session {
 					listener(message);
 				} catch (err) {
 					getLogger().error({ err: errorText(err) }, "message listener threw");
+				}
+			}
+		});
+		this.transport.onFileChunk((chunk) => {
+			for (const listener of this.chunkListeners) {
+				try {
+					listener(chunk);
+				} catch (err) {
+					getLogger().error({ err: errorText(err) }, "file-chunk listener threw");
 				}
 			}
 		});

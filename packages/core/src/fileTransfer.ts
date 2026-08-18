@@ -3,7 +3,7 @@ import { type FileHandle, access, mkdir, open, rename, stat, unlink } from "node
 import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
 import {
-	type FileChunkMessage,
+	type FileChunkFramePayload,
 	type FileEndMessage,
 	type FileStartMessage,
 	type Message,
@@ -184,14 +184,11 @@ export class FileReceiver {
 		this.onEvent = opts.onEvent;
 	}
 
-	/** Feed file-start/-chunk/-end/-abort messages; every other type is ignored. */
+	/** Feed file-start/-end/-abort messages; every other type is ignored. */
 	handleMessage(message: Message): void {
 		switch (message.type) {
 			case "file-start":
 				this.enqueue(() => this.startTransfer(message));
-				break;
-			case "file-chunk":
-				this.enqueue(() => this.writeChunk(message));
 				break;
 			case "file-end":
 				this.enqueue(() => this.finishTransfer(message));
@@ -207,6 +204,15 @@ export class FileReceiver {
 			default:
 				break;
 		}
+	}
+
+	/**
+	 * Feed one inbound chunk frame. Chunks arrive on their own channel
+	 * (binary frames, demuxed by the transport), not through
+	 * `handleMessage`, so they never carry a synthesized id/timestamp.
+	 */
+	handleChunk(chunk: FileChunkFramePayload): void {
+		this.enqueue(() => this.writeChunk(chunk));
 	}
 
 	/**
@@ -281,8 +287,8 @@ export class FileReceiver {
 		this.emit({ kind: "started", transferId, fileName, fileSize });
 	}
 
-	private async writeChunk(message: FileChunkMessage): Promise<void> {
-		const { transferId, index, data } = message.payload;
+	private async writeChunk(chunk: FileChunkFramePayload): Promise<void> {
+		const { transferId, index, data } = chunk;
 		const transfer = this.transfers.get(transferId);
 		if (!transfer) {
 			getLogger().debug({ transferId, index }, "chunk for unknown transfer dropped");

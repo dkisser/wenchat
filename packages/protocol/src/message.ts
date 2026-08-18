@@ -17,22 +17,6 @@ export type FileStartMessage = {
 	};
 };
 
-/**
- * In-process representation of one file chunk. On the wire chunks travel as
- * binary frames (see `frame.ts`), never as JSON — the transport synthesizes
- * this message from a decoded frame so listeners keep a uniform shape.
- */
-export type FileChunkMessage = {
-	type: "file-chunk";
-	id: string;
-	timestamp: number;
-	payload: {
-		transferId: string;
-		index: number;
-		data: Uint8Array;
-	};
-};
-
 export type FileEndMessage = {
 	type: "file-end";
 	id: string;
@@ -75,7 +59,6 @@ export type PongMessage = {
 export type Message =
 	| TextMessage
 	| FileStartMessage
-	| FileChunkMessage
 	| FileEndMessage
 	| FileAbortMessage
 	| PingMessage

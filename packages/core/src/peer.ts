@@ -1,4 +1,4 @@
-import type { Message } from "@wenchat/protocol";
+import type { FileChunkFramePayload, Message } from "@wenchat/protocol";
 import type { SendFileOptions, SendFileResult } from "./fileTransfer";
 import { getLogger } from "./logger";
 import { Session } from "./session";
@@ -52,6 +52,7 @@ export class PeerConnection {
 	private pendingCandidates: IceCandidatePayload[] = [];
 
 	private messageListeners: Set<(message: Message) => void> = new Set();
+	private chunkListeners: Set<(chunk: FileChunkFramePayload) => void> = new Set();
 	private stateListeners: Set<(state: string) => void> = new Set();
 	private incomingListeners: Set<(info: IncomingOfferInfo) => void> = new Set();
 
@@ -164,6 +165,18 @@ export class PeerConnection {
 		};
 	}
 
+	/**
+	 * Fires per inbound file chunk with the raw decoded frame payload.
+	 * Kept off the `onMessage` stream so no synthetic id/timestamp is ever
+	 * invented for data the wire doesn't carry.
+	 */
+	onFileChunk(callback: (chunk: FileChunkFramePayload) => void): () => void {
+		this.chunkListeners.add(callback);
+		return () => {
+			this.chunkListeners.delete(callback);
+		};
+	}
+
 	onStateChange(callback: (state: string) => void): () => void {
 		this.stateListeners.add(callback);
 		return () => {
@@ -261,6 +274,15 @@ export class PeerConnection {
 						listener(message);
 					} catch (err) {
 						getLogger().error({ err: errorText(err) }, "message listener threw");
+					}
+				}
+			}),
+			newSession.onFileChunk((chunk) => {
+				for (const listener of this.chunkListeners) {
+					try {
+						listener(chunk);
+					} catch (err) {
+						getLogger().error({ err: errorText(err) }, "file-chunk listener threw");
 					}
 				}
 			}),
