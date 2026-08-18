@@ -7,6 +7,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-08-18
+
+### Changed
+
+- **CLI now requires an explicit `start` subcommand.** Bare invocations like
+  `wenchat <nickname>` are no longer accepted; use
+  `wenchat start [nickname] [signalingPort] [signalingHost]` or the flag form
+  `wenchat start --name <nickname> --port <port> --host <host>`. This removes
+  ambiguity and makes room for `version`, `help`, and `upgrade` as top-level
+  subcommands.
+
+- **GitHub Release workflow reads release notes from `release-notes/X.Y.Z.md`.**
+  The previous path lookup required a leading `v` in the filename; it now
+  matches the actual generated filename so the release body consistently
+  includes the "What's new" section.
+
+### Added
+
+- **Version is now shown in the StatusBar.** The current version appears next
+  to the connection status, making it obvious which build is running in a
+  packed binary or dev session.
+
 ## [0.1.6] - 2026-08-18
 
 ### Fixed

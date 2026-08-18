@@ -3,7 +3,7 @@
 	"description": "WenChat protocol — zero-dependency message types and chunk serialization for chat and file transfer",
 	"keywords": ["wenchat", "protocol", "message", "serialization", "file-transfer"],
 	"license": "MIT",
-	"version": "0.1.6",
+	"version": "0.1.7",
 	"type": "module",
 	"main": "./src/index.ts",
 	"types": "./src/index.ts",
