@@ -1,27 +1,47 @@
 import { describe, expect, it } from "bun:test";
+import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { CommandSuggestion, isCommandSuggestionVisible } from "../../src/CommandSuggestion";
 
+// Width cap is wider than ink-testing-library's default 80 so the full
+// command row (now 9 entries with reconnect + cancel) fits without wrap
+// or truncation in the assertion frame.
+const WIDE_WIDTH = 200;
+
 describe("CommandSuggestion", () => {
 	it("renders nothing when input is not a slash command", () => {
-		const { lastFrame } = render(<CommandSuggestion partial="hello" />);
+		const { lastFrame } = render(
+			<Box width={WIDE_WIDTH}>
+				<CommandSuggestion partial="hello" />
+			</Box>,
+		);
 		expect(lastFrame()).not.toContain("/exit");
 		expect(lastFrame()).not.toContain("/file");
 	});
 
 	it("renders nothing when input is empty", () => {
-		const { lastFrame } = render(<CommandSuggestion partial="" />);
+		const { lastFrame } = render(
+			<Box width={WIDE_WIDTH}>
+				<CommandSuggestion partial="" />
+			</Box>,
+		);
 		expect(lastFrame()).not.toContain("/exit");
 	});
 
 	it("renders all commands when partial is just a slash", () => {
-		const { lastFrame } = render(<CommandSuggestion partial="/" />);
-		const frame = lastFrame();
+		const { lastFrame } = render(
+			<Box width={WIDE_WIDTH}>
+				<CommandSuggestion partial="/" />
+			</Box>,
+		);
+		const frame = lastFrame() ?? "";
 		expect(frame).toContain("/exit");
 		expect(frame).toContain("/file");
 		expect(frame).toContain("/help");
 		expect(frame).toContain("/connect");
 		expect(frame).toContain("/disconnect");
+		expect(frame).toContain("/reconnect");
+		expect(frame).toContain("/cancel");
 		expect(frame).toContain("/mouse");
 	});
 

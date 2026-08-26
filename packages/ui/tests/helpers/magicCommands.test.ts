@@ -63,6 +63,21 @@ describe("MAGIC_COMMANDS", () => {
 		expect(names).toContain("disconnect");
 	});
 
+	it("includes reconnect and cancel", () => {
+		const names = MAGIC_COMMANDS.map((c) => c.name);
+		expect(names).toContain("reconnect");
+		expect(names).toContain("cancel");
+	});
+
+	it("auto-registers reconnect/cancel in isKnownCommand", () => {
+		expect(isKnownCommand("reconnect")).toBe(true);
+		expect(isKnownCommand("cancel")).toBe(true);
+	});
+
+	it("matchCommands surfaces reconnect on 'rec' prefix", () => {
+		expect(matchCommands("rec").map((c) => c.name)).toContain("reconnect");
+	});
+
 	it("is frozen", () => {
 		expect(Object.isFrozen(MAGIC_COMMANDS)).toBe(true);
 	});
