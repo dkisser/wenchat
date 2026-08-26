@@ -31,6 +31,16 @@ export const MAGIC_COMMANDS: readonly CommandSpec[] = Object.freeze([
 		usage: "/disconnect",
 	},
 	{
+		name: "reconnect",
+		description: "redial the last connected peer",
+		usage: "/reconnect",
+	},
+	{
+		name: "cancel",
+		description: "cancel an in-progress reconnect attempt",
+		usage: "/cancel",
+	},
+	{
 		name: "mouse",
 		description: "toggle mouse tracking (turn off to drag-select text)",
 		usage: "/mouse",

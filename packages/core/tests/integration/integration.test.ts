@@ -245,6 +245,74 @@ describe("core integration", () => {
 		expect(connectedIdx).toBeGreaterThanOrEqual(0);
 		expect(incomingIdx).toBeLessThan(connectedIdx);
 	});
+
+	it("the same alice can reconnect after her pc is force-closed, with messages flowing again", async () => {
+		// Counterpart to "a fresh PeerConnection can reconnect…" (which
+		// models a process restart). This test models the App.tsx
+		// reconnect path: the same `PeerConnection` survives a network
+		// drop, releases the dead session's UDP/STUN resources via
+		// `closeActiveSession`, and re-handshakes. Bob has been up the
+		// whole time, so this exercises the receiver-side `acceptOffer`
+		// building a fresh session against a re-dialing initiator too.
+		const bobReceived: TextMessage[] = [];
+		const unsubMessage = bob.onMessage((msg) => {
+			if (msg.type === "text") bobReceived.push(msg);
+		});
+		const bobStates: string[] = [];
+		const unsubState = bob.onStateChange((s) => bobStates.push(s));
+
+		// First session.
+		await alice.connect("127.0.0.1", bob.getSignalingPort());
+		const firstConnected = await waitForCondition(bobStates, (s) => s === "connected", 5000);
+		expect(firstConnected).toBe(true);
+
+		alice.send({
+			type: "text",
+			id: "first",
+			timestamp: Date.now(),
+			payload: { text: "first hello" },
+		});
+		const gotFirst = await waitForMatch(bobReceived, (m) => m.payload.text === "first hello", 5000);
+		expect(gotFirst).toBe(true);
+
+		// Network-driven close on alice's side.
+		alice._forceCloseActivePc();
+		const bobSawTerminal = await waitForCondition(bobStates, (s) => TERMINAL_STATES.has(s), 8000);
+		expect(bobSawTerminal).toBe(true);
+
+		// Release alice's dead session resources. This is the hook App.tsx
+		// fires after its `onStateChange("closed")` listener — without it
+		// the new pc's ICE stalls in "checking".
+		alice.closeActiveSession();
+
+		// Reconnect on the same PeerConnection. Count connected events so
+		// we wait for the SECOND one (bob sees two distinct sessions).
+		const baselineConnected = bobStates.filter((s) => s === "connected").length;
+		await alice.connect("127.0.0.1", bob.getSignalingPort());
+		const reconnected = await waitForCondition(
+			bobStates,
+			(s) =>
+				s === "connected" && bobStates.filter((x) => x === "connected").length > baselineConnected,
+			10000,
+		);
+		expect(reconnected).toBe(true);
+
+		alice.send({
+			type: "text",
+			id: "second",
+			timestamp: Date.now(),
+			payload: { text: "second hello" },
+		});
+		const gotSecond = await waitForMatch(
+			bobReceived,
+			(m) => m.payload.text === "second hello",
+			8000,
+		);
+		expect(gotSecond).toBe(true);
+
+		unsubMessage();
+		unsubState();
+	}, 30000);
 });
 
 describe("core integration: discovery ↔ signaling wiring", () => {

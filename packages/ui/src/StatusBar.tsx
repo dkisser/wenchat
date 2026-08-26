@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 
-export type StatusBarStatus = "offline" | "connecting" | "online";
+export type StatusBarStatus = "offline" | "connecting" | "reconnecting" | "online";
 
 export type StatusBarToast = {
 	readonly text: string;
@@ -20,11 +20,17 @@ export function formatStatusText(
 ): string {
 	if (status === "offline") return "Offline";
 	if (status === "connecting") return "Connecting...";
+	if (status === "reconnecting") {
+		const target = peerName ? ` to ${peerName}` : peerEndpoint ? ` to ${peerEndpoint}` : "";
+		return `Reconnecting${target}…`;
+	}
 	return `Online${peerName ? ` • ${peerName}` : ""}${peerEndpoint ? ` (${peerEndpoint})` : ""}`;
 }
 
 export function statusColor(status: StatusBarStatus): string {
-	return status === "online" ? "green" : status === "connecting" ? "yellow" : "gray";
+	if (status === "online") return "green";
+	if (status === "connecting" || status === "reconnecting") return "yellow";
+	return "gray";
 }
 
 export type StatusBarProps = {

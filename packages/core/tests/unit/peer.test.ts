@@ -148,6 +148,74 @@ describe("PeerConnection", () => {
 			}
 		});
 	});
+
+	describe("network-driven pc close", () => {
+		// Regression: after the user's pc drops without a local
+		// `/disconnect` (Wi-Fi blip, peer process dies, ICE failure), the
+		// app must be able to dial again on the same `PeerConnection`
+		// without restarting the process. The signaling server is the
+		// long-lived component; the dead pc should be swapped out for a
+		// fresh one on the next `connect()`.
+		//
+		// The app must also release the dead session's UDP/STUN resources
+		// (transport + heartbeat) before the next `connect()` — leaving
+		// them open pins werift's socket state and the new pc's ICE stalls
+		// in "checking" indefinitely. `closeActiveSession()` is the
+		// post-terminal-state hook for that.
+		it("can reconnect on the same PeerConnection after a network-driven close", async () => {
+			const restore = suppressUdpRefused();
+			const alice = new PeerConnection();
+			const bob = new PeerConnection();
+			try {
+				await alice.startListening(0);
+				await bob.startListening(0);
+
+				const states: string[] = [];
+				alice.onStateChange((state) => states.push(state));
+
+				// First handshake.
+				await alice.connect("127.0.0.1", bob.getSignalingPort());
+				await waitForState(states, "connected");
+
+				// Simulate abrupt network death on alice's side. Unlike
+				// `disconnect()` (which detaches the forwarders first),
+				// `_forceClosePc()` is the raw escape hatch that lets
+				// pc.close()'s terminal event reach our listener — that's
+				// the path the reconnect logic in App.tsx has to handle.
+				alice._forceCloseActivePc();
+				await waitForAnyState(states, ["disconnected", "closed", "failed"]);
+
+				// Release the dead session's transport + heartbeat so the
+				// next handshake's UDP/STUN resources don't collide with
+				// the closed pc's leftovers. Without this, the new pc's
+				// ICE stalls in "checking" and never reaches "connected".
+				alice.closeActiveSession();
+
+				// `closeActiveSession` keeps the listeners wired (so a
+				// late close on the dead pc still reaches the app — the
+				// `terminated` flag suppresses that anyway). For the test
+				// it means the dead pc's "closed" already counts toward
+				// the state buffer; we re-subscribe a fresh listener for
+				// the second session so we only count its "connected".
+				const freshStates: string[] = [];
+				const unsub = alice.onStateChange((s) => freshStates.push(s));
+
+				// Second dial on the SAME PeerConnection — this is the
+				// user-reported bug, in single-process form.
+				await alice.connect("127.0.0.1", bob.getSignalingPort());
+				await waitForCount(freshStates, "connected", 1, 5000);
+				unsub();
+
+				// Expect TWO "connected" emissions (one per Session).
+				const connectedCount = states.filter((s) => s === "connected").length;
+				expect(connectedCount).toBeGreaterThanOrEqual(2);
+			} finally {
+				alice.close();
+				bob.close();
+				restore();
+			}
+		});
+	});
 });
 
 async function waitForState(states: string[], target: string, timeoutMs = 2000): Promise<void> {
@@ -157,4 +225,31 @@ async function waitForState(states: string[], target: string, timeoutMs = 2000):
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
 	throw new Error(`timed out waiting for state "${target}", saw: ${states.join(",")}`);
+}
+
+async function waitForAnyState(
+	states: string[],
+	targets: readonly string[],
+	timeoutMs = 2000,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (states.some((s) => targets.includes(s))) return;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error(`timed out waiting for one of [${targets.join(",")}], saw: ${states.join(",")}`);
+}
+
+async function waitForCount(
+	states: string[],
+	target: string,
+	count: number,
+	timeoutMs = 2000,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (states.filter((s) => s === target).length >= count) return;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error(`timed out waiting for ${count}×"${target}", saw: ${states.join(",")}`);
 }

@@ -121,4 +121,32 @@ describe("StatusBar", () => {
 		// emitted the red escape specifically.
 		expect(frame).toContain("\x1b[31m");
 	});
+
+	it("renders 'Reconnecting to <name>...' when reconnecting", () => {
+		const { lastFrame } = render(
+			<StatusBar status="reconnecting" peerName="bob" peerEndpoint="10.0.0.5:9001" />,
+		);
+		const frame = lastFrame() ?? "";
+		expect(frame).toContain("Reconnecting");
+		expect(frame).toContain("bob");
+		// Endpoint is not displayed in the reconnecting line — name is the
+		// more user-friendly identifier; the endpoint lives in chat log
+		// system messages instead.
+		expect(frame).not.toContain("10.0.0.5:9001");
+	});
+
+	it("falls back to endpoint when peerName is missing in reconnecting state", () => {
+		const { lastFrame } = render(<StatusBar status="reconnecting" peerEndpoint="10.0.0.5:9001" />);
+		const frame = lastFrame() ?? "";
+		expect(frame).toContain("Reconnecting");
+		expect(frame).toContain("10.0.0.5:9001");
+	});
+
+	it("styles reconnecting in yellow like connecting", () => {
+		const { lastFrame } = render(<StatusBar status="reconnecting" />);
+		const frame = lastFrame() ?? "";
+		// ANSI yellow is "\x1b[33m"; gray would be "\x1b[90m".
+		expect(frame).toContain("\x1b[33m");
+		expect(frame).not.toContain("\x1b[90m");
+	});
 });

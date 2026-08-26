@@ -220,6 +220,28 @@ export class PeerConnection {
 		this.detachActiveSession();
 	}
 
+	/**
+	 * Release the dead session's resources (pc + transport + heartbeat)
+	 * and forget the reference so the next {@link connect} takes a clean
+	 * `swapSession` path. For the network-driven reconnect path: the app
+	 * has already received the terminal state via {@link onStateChange},
+	 * and a fresh handshake will replace the session via `connect` →
+	 * `swapSession`. Without this call, the dead session's open transport
+	 * + heartbeat keep werift's UDP/STUN resources alive long enough that
+	 * the new pc's ICE gather stalls permanently in "checking" — the
+	 * user's reported "have to restart both sides" symptom.
+	 *
+	 * We deliberately do NOT detach the forwarders first the way
+	 * {@link disconnect} does: the dead session's `terminated` flag
+	 * already suppresses late terminal events, and the next `connect`
+	 * will swap in a fresh session whose listeners are wired in the same
+	 * `swapSession` pass that swaps the session reference.
+	 */
+	closeActiveSession(): void {
+		this.session?.close();
+		this.session = undefined;
+	}
+
 	private detachActiveSession(): void {
 		for (const unsubscribe of this.sessionUnsubscribers) {
 			unsubscribe();
