@@ -7,6 +7,95 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-08-27
+
+### Fixed
+
+- **Auto-reconnect no longer wastes a 28 s window on a peer that left on
+  purpose.** When a peer ran `/exit` or `/disconnect`, the other end used
+  to print "Lost connection to <peer>. Reconnecting in 1s…" and burn the
+  full backoff re-dialing someone who had deliberately left. WebRTC
+  carries no intent: a peer calling `pc.close()` and a peer whose Wi-Fi
+  died produce the identical `'closed'` event on the other end, so the
+  receiver had to assume every close was a network blip. A new
+  `ByeMessage { reason: 'exit' | 'disconnect' }` in `@wenchat/protocol`
+  lets peers signal intent; a new `connectionState.ts` owns a
+  `CloseReason` vocabulary (`network`, `heartbeat-timeout`, `local-exit`,
+  `local-disconnect`, `remote-exit`, `remote-disconnect`) with a single
+  `isRetryable()` gate, and the four-mutable-ref reconnect logic in
+  `App` is replaced by a pure `reduce(phase, event)` state machine in
+  `apps/cli/src/connectionMachine.ts`. Only `isRetryable(reason)` can
+  produce a `schedule-retry`, so a peer's deliberate departure now reads
+  "alice left the chat." and stops there. The protocol change is purely
+  additive: an older peer hits the decode guard, logs "dropping
+  undecodable message", and falls back to the old behaviour.
+
+- **`PeerConnection.closeGracefully()` now waits for the bye to drain.**
+  `connect()` resolved once the answer SDP was applied, which can be
+  before SCTP had the channel open — an integration test caught exactly
+  that race dropping the bye. The new close path waits (bounded, 200 ms
+  each) for the channel to be open and for the bye to drain before
+  killing the pc; concurrent `swapSession` calls (incoming-offer-races-
+  teardown, retry's close-active-session + connect) re-check the session
+  reference after each await and bail if it changed.
+
+- **Signaling teardown no longer blocks `/exit` on a remote keep-alive
+  socket.** `server.close()` only invokes its callback once every open
+  connection has gone away. Awaiting `signaling.stop()` behind
+  `closeGracefully()` could therefore hang shutdown indefinitely; the
+  graceful-close path now fires-and-forgets the signaling teardown.
+
+- **A late dial can no longer undo a `/disconnect`.** `peerConnection
+  .connect()` resolves once the answer SDP lands; if a user action
+  landed during the handshake, the late `await` was swapping in a
+  session the user said no to. `runDial` now checks the generation
+  token on the success path and tears the late session back down via
+  `closeStaleDialSession()`, which preserves the most recent teardown
+  intent (set by `closeGracefully()` / `close()` / `disconnect()`)
+  instead of falling through to `reason="network"` — a stale-close race
+  that previously re-classified a deliberate `/disconnect` as
+  retryable and re-printed "Failed to connect to X" beside the
+  disconnect notice.
+
+- **`/disconnect` is no longer delayed by up to 400 ms.** The notice
+  was previously round-tripped through the wire event; `user-disconnect`
+  now emits "Disconnected from <peer>" synchronously, and the wire-event
+  path is silenced for `local-*` reasons to avoid the duplicate.
+
+- **`/exit` no longer freezes the TUI for up to half a second.**
+  Awaiting `closeGracefully("local-exit")` (which itself waits up to
+  400 ms for the bye to drain) before calling `exit()` stalled the
+  alt-screen release; fire-and-forget the close on the exit path and
+  let the process die.
+
+### Changed
+
+- **The reconnect logic is now a pure reducer.** The four mutable refs
+  (`cancel the timer, zero the attempt, bump the generation`) were
+  copy-pasted across six handlers, and any handler that forgot one was
+  a bug. `apps/cli/src/connectionMachine.ts` replaces them with
+  `reduce(phase, event) -> {phase, effects}`; phases are `idle /
+  dialing / online / retrying(attempt)`, effects are data the App
+  executes, and `StatusBar`'s four-value status is derived via
+  `toStatusBarStatus()` so the bar can no longer disagree with the
+  machine.
+
+- **`App.tsx` no longer exceeds the 800-line cap.** Connection-machine
+  plumbing (phase, dispatch, appendSystemMessage, lastPeerRef, the
+  reconnect timer, the generation token, the runDial/runEffect wiring)
+  lives in a new `apps/cli/src/useConnectionMachine.ts`; `App.tsx` is
+  now 771 lines.
+
+### Added
+
+- **`ByeMessage` in `@wenchat/protocol`** (`{ reason: 'exit' |
+  'disconnect' }`, plus `createBye()` and a codec whitelist entry).
+  Worth surfacing as its own entry: a peer that receives a `bye` tears
+  down immediately with the remote reason rather than waiting for the
+  peer's `pc.close()` to propagate, because that path is async and
+  unguaranteed and our own watchdog could otherwise fire mid-gap and
+  relabel the close as `heartbeat-timeout`, which reads as retryable.
+
 ## [0.1.8] - 2026-08-27
 
 ### Fixed

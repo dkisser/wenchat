@@ -18,7 +18,7 @@
 		"file-transfer"
 	],
 	"license": "MIT",
-	"version": "0.1.8",
+	"version": "0.1.9",
 	"type": "module",
 	"bin": {
 		"wenchat": "./dist/main.js"
