@@ -269,18 +269,25 @@ export class PeerConnection {
 			// the peer would fall back to redialing us. Wait it out — bounded,
 			// and a no-op in the normal case where the channel is long open.
 			await this.waitUntil(() => session.canSendBye, BYE_OPEN_TIMEOUT_MS);
+			// A concurrent `swapSession` (e.g. an incoming offer racing our
+			// teardown, or a retry's `close-active-session` + `connect`) could
+			// have replaced `this.session` while we were waiting. Bail out so
+			// we do not send a bye on a session the peer no longer shares, or
+			// tear down a session that belongs to someone else's call.
+			if (this.session !== session) return;
 			session.sendBye(reason === "local-exit" ? "exit" : "disconnect");
 			// `sendBye` only queues bytes; `pc.close()` right after would
 			// discard them.
 			await this.waitUntil(() => session.bufferedAmount === 0, BYE_FLUSH_TIMEOUT_MS);
+			if (this.session !== session) return;
 		}
 		this.closeSession(reason);
 		if (stopSignaling) {
-			// Deliberately NOT awaited: `server.close()` only invokes its
-			// callback once every open connection has gone away, and a peer
-			// holding a keep-alive socket can stall that indefinitely. The
-			// `/exit` path awaits this method before Ink's `exit()`, so an
-			// await here would hang the whole shutdown behind a remote socket.
+			// Fire-and-forget: `server.close()` only invokes its callback
+			// once every open connection has gone away, and a peer holding
+			// a keep-alive socket can stall that indefinitely. The `/exit`
+			// path awaits this method before Ink's `exit()`, so awaiting
+			// would hang the whole shutdown behind a remote socket.
 			this.signaling.stop().catch(() => {});
 		}
 	}

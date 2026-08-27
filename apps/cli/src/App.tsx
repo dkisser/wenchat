@@ -39,16 +39,8 @@ import {
 import { Box, Text, useApp, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { copyToClipboard } from "./clipboard";
-import {
-	type ConnectionPhase,
-	type Effect,
-	IDLE_PHASE,
-	type MachineEvent,
-	describePeer,
-	phasePeer,
-	reduce,
-	toStatusBarStatus,
-} from "./connectionMachine";
+import { describePeer, phasePeer, toStatusBarStatus } from "./connectionMachine";
+import { useConnectionMachine } from "./connectionMachineBindings";
 import { isMouseModeEnabled, toggleMouseMode } from "./mouseMode";
 import { getCurrentVersion } from "./updater";
 
@@ -81,14 +73,6 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	const { exit } = useApp();
 	const [peers, setPeers] = useState<PeerInfo[]>([]);
 	const [messages, setMessages] = useState<Message[]>([...initialMessages]);
-	// The single source of truth for "where is this connection at". Replaces
-	// the old `status` string plus the pile of reconnect refs — see
-	// `connectionMachine.ts` for why.
-	const [phase, setPhase] = useState<ConnectionPhase>(IDLE_PHASE);
-	const selectedPeer = phasePeer(phase);
-	// The four-value union `StatusBar`/`Header` render from. Derived, so the
-	// bar can never disagree with the machine about what state we're in.
-	const status = toStatusBarStatus(phase);
 	const [inputText, setInputText] = useState("");
 	// `main.tsx` may have already entered mouse mode (TTY, no `--no-mouse`);
 	// seed React state from the actual terminal state so the first render
@@ -110,31 +94,56 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	const [discovery] = useState(() => new DiscoveryService());
 	const [peerConnection] = useState(() => new PeerConnection());
 
-	// Monotonic counter incremented on every connect/disconnect. Each
-	// in-flight `connect()` captures its own generation and bails out
-	// (without swapping in its session or surfacing errors) if a later
-	// generation has been started — otherwise a `/disconnect` issued while
-	// a handshake is in flight could be silently undone when the late
-	// `await` resolves and re-installs the session under our feet.
-	const connectionGenerationRef = useRef(0);
+	const [fileReceiver] = useState(
+		() =>
+			new FileReceiver({
+				onEvent: (event: TransferEvent) => {
+					if (event.kind === "started") {
+						appendSystemMessage(`Receiving ${event.fileName} (${formatBytes(event.fileSize)})…`);
+						return;
+					}
+					if (event.kind === "progress") {
+						const pct =
+							event.totalBytes > 0 ? Math.round((event.receivedBytes / event.totalBytes) * 100) : 0;
+						showTransferProgress(`Receiving ${event.fileName} — ${pct}%`);
+						return;
+					}
+					if (event.kind === "completed") {
+						appendSystemMessage(`Saved file: ${event.path}`);
+						return;
+					}
+					// failed
+					appendSystemMessage(
+						`File transfer failed: ${event.fileName} — ${event.reason} (logs: ${getLogFilePath()})`,
+					);
+					// A locally-caused failure (checksum, disk, ordering) should
+					// stop the sender instead of letting it stream into the void.
+					// Best-effort: the connection may already be gone.
+					if (!event.reason.startsWith("aborted by peer")) {
+						try {
+							peerConnection.send(createFileAbort(event.transferId, event.reason));
+						} catch {
+							// channel closed — nothing to tell the peer
+						}
+					}
+				},
+			}),
+	);
 
-	// Snapshot of the last peer we initiated a session with (PeerList
-	// click or `/connect`). Deliberately OUTSIDE the state machine: it
-	// outlives every phase — including the idle gap after a peer left — so
-	// `/reconnect` can redial without the user having to remember host:port.
-	// Only written for OUTBOUND calls; an incoming offer is not "the peer we
-	// wanted to talk to".
-	const lastPeerRef = useRef<PeerInfo | null>(null);
-
-	// `setTimeout` handle for the pending reconnect. Written only by the
-	// effect executor (`schedule-retry` / `cancel-retry`) and by the
-	// useEffect cleanup on unmount — never by a command handler.
-	const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-	// Mirror `phase` into a ref so the long-lived listener closures —
-	// registered once on mount — reduce against the CURRENT phase instead of
-	// the one captured at mount time (always idle).
-	const phaseRef = useRef<ConnectionPhase>(IDLE_PHASE);
+	// All connection-machine plumbing (phase, dispatch, appendSystemMessage,
+	// lastPeerRef, the reconnect timer, the generation token) lives here. The
+	// hook owns the imperative parts the reducer cannot model; the rest is
+	// the pure machine. Called AFTER `fileReceiver` is constructed so the
+	// transfer-event callback above can use `appendSystemMessage`.
+	const { phase, phaseRef, dispatch, appendSystemMessage, lastPeerRef } = useConnectionMachine(
+		peerConnection,
+		fileReceiver,
+		setMessages,
+	);
+	const selectedPeer = phasePeer(phase);
+	// The four-value union `StatusBar`/`Header` render from. Derived, so the
+	// bar can never disagree with the machine about what state we're in.
+	const status = toStatusBarStatus(phase);
 
 	// Same mirror for the discovery list: the long-lived `onIncoming`
 	// closure (registered once on mount) needs the latest `peers` to look
@@ -241,10 +250,9 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 
 		return () => {
 			cancelled = true;
-			if (reconnectTimerRef.current !== null) {
-				clearTimeout(reconnectTimerRef.current);
-				reconnectTimerRef.current = null;
-			}
+			// The reconnect timer is owned by the connection-machine hook and
+			// cleared in its own unmount effect — keeping the clear here too
+			// would race two cleanup passes.
 			unsubscribePeers();
 			unsubscribeIncoming();
 			unsubscribeMessage();
@@ -254,7 +262,18 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			discovery.stop().catch(() => {});
 			peerConnection.close();
 		};
-	}, [discovery, displayName, peerConnection, signalingPort, bindHost]);
+	}, [
+		discovery,
+		displayName,
+		peerConnection,
+		signalingPort,
+		bindHost,
+		appendSystemMessage,
+		fileReceiver,
+		dispatch,
+		lastPeerRef,
+		phaseRef,
+	]);
 
 	// Every dial entry point — PeerList click, `/connect`, `/reconnect` —
 	// funnels through the machine's `dial` event, which owns the
@@ -552,149 +571,6 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		},
 		[showToast],
 	);
-
-	const [fileReceiver] = useState(
-		() =>
-			new FileReceiver({
-				onEvent: (event: TransferEvent) => {
-					if (event.kind === "started") {
-						appendSystemMessage(`Receiving ${event.fileName} (${formatBytes(event.fileSize)})…`);
-						return;
-					}
-					if (event.kind === "progress") {
-						const pct =
-							event.totalBytes > 0 ? Math.round((event.receivedBytes / event.totalBytes) * 100) : 0;
-						showTransferProgress(`Receiving ${event.fileName} — ${pct}%`);
-						return;
-					}
-					if (event.kind === "completed") {
-						appendSystemMessage(`Saved file: ${event.path}`);
-						return;
-					}
-					// failed
-					appendSystemMessage(
-						`File transfer failed: ${event.fileName} — ${event.reason} (logs: ${getLogFilePath()})`,
-					);
-					// A locally-caused failure (checksum, disk, ordering) should
-					// stop the sender instead of letting it stream into the void.
-					// Best-effort: the connection may already be gone.
-					if (!event.reason.startsWith("aborted by peer")) {
-						try {
-							peerConnection.send(createFileAbort(event.transferId, event.reason));
-						} catch {
-							// channel closed — nothing to tell the peer
-						}
-					}
-				},
-			}),
-	);
-
-	// State-machine plumbing — declared ahead of the main `useEffect` so the
-	// `onStateChange` and `onIncoming` closures registered there can call
-	// `dispatch` without an "is not defined" TDZ trip. (They reference it
-	// from inside the callback body only; it is deliberately NOT in that
-	// effect's dependency array, which is what keeps the TDZ closed.)
-	const appendSystemMessage = useCallback((text: string) => {
-		const message: TextMessage = {
-			type: "text",
-			id: `system-${randomUUID()}`,
-			timestamp: Date.now(),
-			payload: { text },
-		};
-		setMessages((prev) => appendCapped(prev, message));
-	}, []);
-
-	const cancelReconnectTimer = useCallback(() => {
-		if (reconnectTimerRef.current !== null) {
-			clearTimeout(reconnectTimerRef.current);
-			reconnectTimerRef.current = null;
-		}
-	}, []);
-
-	/**
-	 * Dial a peer, reporting failure back into the machine.
-	 *
-	 * The generation token guards the async gap: if a later user action (or a
-	 * `/disconnect`) supersedes this dial while the handshake is in flight, a
-	 * late resolve must not re-install its session or surface a stale error.
-	 * That concern is orthogonal to the phase, which is why the counter stays
-	 * out here rather than inside the reducer.
-	 */
-	const runDial = useCallback(
-		async (peer: PeerInfo) => {
-			const myGeneration = connectionGenerationRef.current;
-			try {
-				await peerConnection.connect(peer.signalingHost, peer.signalingPort);
-			} catch {
-				if (connectionGenerationRef.current !== myGeneration) return;
-				dispatchRef.current({ kind: "dial-failed" });
-			}
-		},
-		[peerConnection],
-	);
-
-	/** The one place a machine effect turns into a real side effect. */
-	const runEffect = useCallback(
-		(effect: Effect) => {
-			switch (effect.kind) {
-				case "cancel-retry":
-					cancelReconnectTimer();
-					return;
-				case "schedule-retry":
-					cancelReconnectTimer();
-					reconnectTimerRef.current = setTimeout(() => {
-						reconnectTimerRef.current = null;
-						dispatchRef.current({ kind: "retry-fired" });
-					}, effect.delayMs);
-					return;
-				case "dial":
-					void runDial(effect.peer);
-					return;
-				case "close-active-session":
-					// Release the dead session's UDP/STUN resources so the new
-					// pc's ICE gather doesn't stall against the closed pc's
-					// leftovers. Safe when no session is active.
-					peerConnection.closeActiveSession();
-					return;
-				case "close-graceful":
-					void peerConnection.closeGracefully(effect.reason);
-					return;
-				case "invalidate-dials":
-					connectionGenerationRef.current++;
-					return;
-				case "dispose-transfers":
-					// Any in-flight incoming transfer is now hopeless — clean up
-					// its temp file and emit a "failed" system entry per transfer.
-					void fileReceiver.dispose();
-					return;
-				case "system-message":
-					appendSystemMessage(effect.text);
-					return;
-			}
-		},
-		[appendSystemMessage, cancelReconnectTimer, fileReceiver, peerConnection, runDial],
-	);
-
-	const dispatch = useCallback(
-		(event: MachineEvent) => {
-			// Reduce against the ref, not the rendered `phase`: several events
-			// can land inside one tick (a terminal event immediately followed by
-			// its retry), and the rendered value would still be the pre-tick one.
-			const { phase: next, effects } = reduce(phaseRef.current, event);
-			phaseRef.current = next;
-			setPhase(next);
-			for (const effect of effects) {
-				runEffect(effect);
-			}
-		},
-		[runEffect],
-	);
-
-	// `runDial` and the retry timer need to dispatch, but they are defined
-	// above `dispatch`. Route them through a ref so there is no circular
-	// `useCallback` dependency (and no stale closure either).
-	const dispatchRef = useRef(dispatch);
-	dispatchRef.current = dispatch;
 
 	const copyAndReport = useCallback(
 		(text: string) => {

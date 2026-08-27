@@ -114,11 +114,12 @@ export function describePeer(peer: PeerInfo): string {
 }
 
 /**
- * What to tell the user about a close we are NOT retrying.
+ * What to tell the user about a REMOTE close we are NOT retrying.
  *
- * `local-exit` returns null on purpose: that side is quitting, its own
- * handler already logged the notice before teardown, and the React tree is
- * about to unmount — a second message would either duplicate or race.
+ * Local-close notices are printed synchronously by their respective
+ * `user-*` handlers — they never reach this function. Returning null on
+ * every non-remote reason keeps the switch total and prevents the wire
+ * event from re-printing what the user action already said.
  */
 function farewellText(reason: CloseReason, peer: PeerInfo): string | null {
 	switch (reason) {
@@ -126,13 +127,11 @@ function farewellText(reason: CloseReason, peer: PeerInfo): string | null {
 			return `${peerLabel(peer)} left the chat.`;
 		case "remote-disconnect":
 			return `${peerLabel(peer)} disconnected.`;
+		case "network":
+		case "heartbeat-timeout":
 		case "local-disconnect":
-			return `Disconnected from ${describePeer(peer)}`;
 		case "local-exit":
 			return null;
-		default:
-			// Retryable reasons never reach here; keep the switch total.
-			return `Disconnected from ${describePeer(peer)}`;
 	}
 }
 
@@ -196,11 +195,35 @@ function handleWire(phase: ConnectionPhase, event: ConnectionEvent): Transition 
 	if (!peer) {
 		return { phase: IDLE_PHASE, effects: [{ kind: "dispose-transfers" }] };
 	}
+	// A terminal event during a USER-INITIATED dial (retryable reason from a
+	// `dialing` phase) is still a user-initiated failure: do not auto-redial,
+	// which would betray the explicit "user-initiated dials are NOT
+	// auto-retried" contract from the `dial-failed` branch.
+	if (phase.kind === "dialing") {
+		const text = farewellText("network", peer) ?? `Failed to connect to ${describePeer(peer)}`;
+		return {
+			phase: IDLE_PHASE,
+			effects: [
+				{ kind: "dispose-transfers" },
+				{ kind: "cancel-retry" },
+				{ kind: "system-message", text },
+			],
+		};
+	}
 	if (isRetryable(event.reason)) {
 		const attempt = phase.kind === "retrying" ? phase.attempt : 1;
 		return scheduleRetry(peer, attempt, [{ kind: "dispose-transfers" }]);
 	}
-	const text = farewellText(event.reason, peer);
+	// For LOCAL-* reasons the user-facing notice was already printed when
+	// the user action fired (the `user-disconnect` handler prints the
+	// disconnect notice synchronously; `user-exit` is handled in App.tsx
+	// before teardown). Re-printing on the wire event would print the same
+	// string twice. Only REMOTE reasons get a message here — those have no
+	// opportunity to print earlier.
+	const text =
+		event.reason === "remote-exit" || event.reason === "remote-disconnect"
+			? farewellText(event.reason, peer)
+			: null;
 	return {
 		phase: IDLE_PHASE,
 		effects: [
@@ -275,16 +298,22 @@ export function reduce(phase: ConnectionPhase, event: MachineEvent): Transition 
 			if (phase.kind === "idle") {
 				return stay(phase, { kind: "system-message", text: "Not connected" });
 			}
-			// Stay put and let the resulting terminal event drive the
-			// transition. That keeps ONE source of truth for the "Disconnected
-			// from …" notice — emitting it here too is how the pre-refactor
-			// code ended up printing it twice once local closes became
-			// visible to listeners.
+			// Non-null safe: the early-return above already covered idle.
+			const peer = phasePeer(phase);
+			if (!peer) return stay(phase);
+			// Print the disconnect notice HERE rather than waiting for the
+			// terminal event to round-trip the same string back: `close-
+			// graceful` sends a `bye`, waits up to 400ms for it to drain, and
+			// only then closes the pc. The terminal event arrives after that
+			// — too late for chat-log responsiveness. Phase is left unchanged
+			// so the resulting wire event is the single source of truth for
+			// the transition itself.
 			return stay(
 				phase,
 				{ kind: "cancel-retry" },
 				{ kind: "invalidate-dials" },
 				{ kind: "close-graceful", reason: "local-disconnect" },
+				{ kind: "system-message", text: `Disconnected from ${describePeer(peer)}` },
 			);
 		}
 

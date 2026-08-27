@@ -76,6 +76,16 @@ describe("connectionMachine — the retry gate", () => {
 		}
 	});
 
+	// A retryable close during a USER-INITIATED dial is still a user-initiated
+	// failure — auto-retrying would betray the `dial-failed` contract.
+	for (const reason of RETRYABLE) {
+		it(`does not auto-retry a user-initiated dial that closed as "${reason}"`, () => {
+			const { phase, effects } = reduce(DIALING, closed(reason));
+			expect(phase).toEqual(IDLE_PHASE);
+			expect(kinds(effects)).not.toContain("schedule-retry");
+		});
+	}
+
 	it("goes idle on a terminal event with no peer, without messaging", () => {
 		const { phase, effects } = reduce(IDLE_PHASE, closed("network"));
 		expect(phase).toEqual(IDLE_PHASE);
@@ -87,7 +97,6 @@ describe("connectionMachine — farewell wording", () => {
 	const cases: ReadonlyArray<readonly [CloseReason, string]> = [
 		["remote-exit", "alice left the chat."],
 		["remote-disconnect", "alice disconnected."],
-		["local-disconnect", "Disconnected from alice (192.168.1.10:4242)"],
 	];
 
 	for (const [reason, text] of cases) {
@@ -96,15 +105,42 @@ describe("connectionMachine — farewell wording", () => {
 		});
 	}
 
-	it("stays silent for local-exit — that handler logs its own notice", () => {
-		expect(messages(reduce(ONLINE, closed("local-exit")).effects)).toEqual([]);
-	});
+	// LOCAL-* reasons are printed synchronously by the user-* handlers
+	// (see `user-disconnect`/`user-exit`). Re-printing on the wire event
+	// would emit the same string twice.
+	for (const reason of ["local-disconnect", "local-exit"] as const) {
+		it(`does not duplicate the notice for "${reason}"`, () => {
+			expect(messages(reduce(ONLINE, closed(reason)).effects)).toEqual([]);
+		});
+	}
 
 	it("names a manually dialed peer by endpoint", () => {
 		const phase: ConnectionPhase = { kind: "online", peer: manual };
 		expect(messages(reduce(phase, closed("remote-exit")).effects)).toEqual([
 			"192.168.1.11:5000 left the chat.",
 		]);
+	});
+});
+
+describe("connectionMachine — user-disconnect prints immediately", () => {
+	// `closeGracefully` waits up to 400ms for the bye to drain before closing
+	// the pc; the terminal event arrives after. To avoid a 400ms feedback gap,
+	// the user-disconnect path emits the notice synchronously rather than
+	// waiting for the wire event.
+	it("prints 'Disconnected from …' synchronously when online", () => {
+		expect(messages(reduce(ONLINE, { kind: "user-disconnect" }).effects)).toEqual([
+			"Disconnected from alice (192.168.1.10:4242)",
+		]);
+	});
+
+	it("prints nothing on a manual disconnect while idle", () => {
+		const { phase, effects } = reduce(IDLE_PHASE, { kind: "user-disconnect" });
+		expect(phase).toEqual(IDLE_PHASE);
+		expect(messages(effects)).toEqual(["Not connected"]);
+	});
+
+	it("still cancels any pending retry on disconnect", () => {
+		expect(kinds(reduce(RETRYING, { kind: "user-disconnect" }).effects)).toContain("cancel-retry");
 	});
 });
 
@@ -176,10 +212,12 @@ describe("connectionMachine — user actions", () => {
 	it("closes gracefully on /disconnect and lets the wire event finish the job", () => {
 		const { phase, effects } = reduce(ONLINE, { kind: "user-disconnect" });
 		// Phase deliberately unchanged: the terminal event is the single
-		// source of truth for both the transition and the notice.
+		// source of truth for the TRANSITION. The notice, however, is printed
+		// here, not on the wire event — otherwise the user sees nothing for
+		// up to 400ms while the bye drains.
 		expect(phase).toEqual(ONLINE);
 		expect(effects).toContainEqual({ kind: "close-graceful", reason: "local-disconnect" });
-		expect(messages(effects)).toEqual([]);
+		expect(messages(effects)).toEqual(["Disconnected from alice (192.168.1.10:4242)"]);
 	});
 
 	it("reports /disconnect with nothing connected", () => {
