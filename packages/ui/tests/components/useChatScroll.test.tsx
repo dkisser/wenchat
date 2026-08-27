@@ -53,7 +53,9 @@ describe("useChatScroll", () => {
 		const { lastFrame } = render(<Probe messages={log(20)} />);
 		await tick();
 		const frame = lastFrame() ?? "";
-		expectWindow(frame, 15, 19);
+		// Bottom 5 lines = blank, m17, blank, m18, blank, m19 — actually 5
+		// rows so 3 messages (inter-message blank rows eat ~half the view).
+		expectWindow(frame, 17, 19);
 		expect(frame).not.toContain("m14");
 		expect(frame).toContain("bottom=true");
 	});
@@ -66,8 +68,9 @@ describe("useChatScroll", () => {
 		await tick();
 
 		const frame = lastFrame() ?? "";
-		expectWindow(frame, 12, 16);
-		expect(frame).not.toContain("m17");
+		// Three lines up from the bottom = blank, m16, blank, m17, blank.
+		expectWindow(frame, 16, 17);
+		expect(frame).not.toContain("m18");
 		expect(frame).toContain("bottom=false");
 	});
 
@@ -95,7 +98,9 @@ describe("useChatScroll", () => {
 		rerender(<Probe messages={[...log(20), ...log(2, 20)]} />);
 		await tick();
 
-		expectWindow(lastFrame() ?? "", 12, 16);
+		// Same scrolled-up window as before appending — only the unread
+		// counter changes. Inter-message blanks keep the window to 2 msgs.
+		expectWindow(lastFrame() ?? "", 16, 17);
 		expect(lastFrame()).toContain("unread=2");
 		expect(beforeAppend).toContain("unread=0");
 	});
@@ -136,8 +141,9 @@ describe("useChatScroll", () => {
 
 		stdin.write(PAGE_UP);
 		await tick();
-		// viewportHeight 5 → a page is 4 lines.
-		expectWindow(lastFrame() ?? "", 21, 25);
+		// viewportHeight 5 → a page is 4 lines, so from the bottom (m27/28/29)
+		// PageUp lands on the prior 4-line window: blank, m25, blank, m26, m27.
+		expectWindow(lastFrame() ?? "", 25, 27);
 
 		stdin.write(PAGE_DOWN);
 		await tick();
@@ -151,7 +157,9 @@ describe("useChatScroll", () => {
 		stdin.write(SHIFT_UP);
 		await tick();
 
-		expectWindow(lastFrame() ?? "", 14, 18);
+		// Bottom viewport (lines 34–38) shifted up by 1 = lines 33–37 =
+		// blank, m17, blank, m18, blank — 2 messages, same scroll distance.
+		expectWindow(lastFrame() ?? "", 17, 18);
 	});
 
 	it("ignores scroll input while inactive", async () => {

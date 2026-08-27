@@ -166,10 +166,15 @@ describe("toDisplayLines", () => {
 
 	it("preserves message order", () => {
 		const result = toDisplayLines([text("local-1", "one"), text("r-2", "two")], "local", NAMES, 40);
+		// One blank row sits between every pair of messages, owned by the
+		// second — so the second message's start index points at the blank
+		// row itself (line 1), not the line after it.
 		expect(result.lines.map(stripAnsi)).toEqual([
 			`${formatTimestamp(0)}  alice  one`,
+			" ",
 			`${formatTimestamp(0)}  peer   two`,
 		]);
+		expect(result.messageStartIndices).toEqual([0, 1]);
 	});
 
 	it("indents soft-wrapped continuation lines to the body column", () => {
@@ -190,7 +195,8 @@ describe("toDisplayLines", () => {
 	});
 
 	it("records each message's starting line index", () => {
-		// First message's body wraps to 2 lines, second message starts at line 2.
+		// First message's body wraps to 2 lines (lines 0–1), the blank row
+		// owned by the second message sits at line 2.
 		const messages = [text("local-1", "abcdef"), text("r-2", "ghi")];
 		const result = toDisplayLines(messages, "local", NAMES, 18);
 		expect(result.messageStartIndices).toEqual([0, 2]);
@@ -211,6 +217,20 @@ describe("toDisplayLines", () => {
 		const result = toDisplayLines([text("system-1", "Connected")], "local", NAMES, 40);
 		expect(result.messageStartIndices).toEqual([0]);
 		expect(stripAnsi(result.lines[0] ?? "")).toBe("Connected");
+	});
+
+	it("inserts one blank row between two non-system messages, owned by the second", () => {
+		const result = toDisplayLines([text("local-1", "one"), text("r-2", "two")], "local", NAMES, 40);
+		// Blank row sits between them; its start index belongs to the
+		// second message, so a click on the blank still resolves to msg #2.
+		expect(result.messageStartIndices).toEqual([0, 1]);
+		expect(result.lines[1]).toBe(" ");
+	});
+
+	it("does not lead with a blank row for the first non-system message", () => {
+		const result = toDisplayLines([text("local-1", "only")], "local", NAMES, 40);
+		expect(result.messageStartIndices).toEqual([0]);
+		expect(result.lines[0]).not.toBe(" ");
 	});
 });
 

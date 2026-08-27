@@ -133,6 +133,12 @@ export type DisplayLines = {
  * as pathological — realistic widths leave far more room than the ~9 +
  * nameWidth columns a prefix needs.
  *
+ * Every non-first message is preceded by exactly one blank row, owned by
+ * that message (`messageStartIndices[i]` points at the blank itself). This
+ * keeps the visual gap uniform regardless of sender, so wrapped tails of
+ * long messages do not bleed into the next speaker's timestamp, and a
+ * double-click on the blank still resolves to the message that follows.
+ *
  * Returns both the wrapped output and a parallel `messageStartIndices` array
  * so callers can answer "which message owns line N?" in O(log n).
  */
@@ -147,11 +153,12 @@ export function toDisplayLines(
 	for (const [index, message] of messages.entries()) {
 		messageStartIndices.push(lines.length);
 		const formatted = formatMessage(message, localId, names);
+		// One blank row above every non-first message, owned by this message
+		// because its start index already points here. This replaces the
+		// older chat→system-only separator: every pair of messages now gets
+		// the same uniform gap, so the unified rule above is the whole story.
+		if (index > 0) lines.push(" ");
 		if (formatted.system) {
-			// A blank separator row sets system entries apart from the chatter
-			// above. It belongs to this message's line block (its start index
-			// is already pushed), so double-click copy still resolves to it.
-			if (index > 0) lines.push(" ");
 			for (const line of wrapToWidth(formatted.body, contentWidth)) {
 				lines.push(line.length > 0 ? line : " ");
 			}
