@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import type { ConnectionEvent } from "../../src/connectionState";
 import { type IncomingOfferInfo, PeerConnection } from "../../src/peer";
+import { countState, waitForClose, waitForCount, waitForState } from "../helpers/connectionEvents";
 import { suppressUdpRefused } from "../helpers/udpSuppression";
 
 describe("PeerConnection", () => {
@@ -87,13 +89,15 @@ describe("PeerConnection", () => {
 			}
 		});
 
-		it("tears down the active session without notifying listeners", async () => {
-			// Regression test: an earlier refactor detached forwarders but
-			// then closed the session, which let pc.close()'s async
-			// "closed" event race a fresh swapSession and surface a stale
-			// "disconnected" to the app. After disconnect, the local app
-			// should NOT observe a terminal state — that's what the
-			// `/disconnect` magic command relies on for its own message.
+		it("emits a local-disconnect terminal event so the app can skip retrying", async () => {
+			// Behaviour reversal: this used to assert the OPPOSITE — that a
+			// manual `/disconnect` produced NO terminal event, because
+			// `disconnect()` detached its forwarders before closing. That made
+			// "was this intentional?" the *absence* of an event, a side
+			// channel that could not express the remote case at all: a peer's
+			// `/disconnect` looked exactly like a Wi-Fi drop, so the far end
+			// burned a full reconnect-backoff window on a peer that had left.
+			// The intent now travels WITH the event as a CloseReason.
 			const restore = suppressUdpRefused();
 			const alice = new PeerConnection();
 			const bob = new PeerConnection();
@@ -101,23 +105,43 @@ describe("PeerConnection", () => {
 				await alice.startListening(0);
 				await bob.startListening(0);
 
-				const states: string[] = [];
-				alice.onStateChange((state) => states.push(state));
+				const events: ConnectionEvent[] = [];
+				alice.onStateChange((event) => events.push(event));
 				await alice.connect("127.0.0.1", bob.getSignalingPort());
 
 				// Wait for "connected" so we know the session is live.
-				await waitForState(states, "connected");
+				await waitForState(events, "connected");
 
 				alice.disconnect();
 
-				// Give the async pc.close() callback a tick to (incorrectly)
-				// fire a terminal event into the listener.
+				expect(await waitForClose(events)).toBe("local-disconnect");
+				// Exactly one terminal event: `Session.terminated` still
+				// dedupes the async pc.close() callback that follows.
 				await new Promise((resolve) => setTimeout(resolve, 50));
+				expect(countState(events, "closed")).toBe(1);
+			} finally {
+				alice.close();
+				bob.close();
+				restore();
+			}
+		});
 
-				// The initiator side never emits a "connecting" state — it
-				// jumps straight to "connected" once the answer SDP lands —
-				// so the expected sequence is just the single connected.
-				expect(states).toEqual(["connected"]);
+		it("sends a bye before closing so the peer learns the teardown was deliberate", async () => {
+			const restore = suppressUdpRefused();
+			const alice = new PeerConnection();
+			const bob = new PeerConnection();
+			try {
+				await alice.startListening(0);
+				await bob.startListening(0);
+
+				const bobEvents: ConnectionEvent[] = [];
+				bob.onStateChange((event) => bobEvents.push(event));
+				await alice.connect("127.0.0.1", bob.getSignalingPort());
+				await waitForState(bobEvents, "connected", 5000);
+
+				await alice.closeGracefully("local-disconnect");
+
+				expect(await waitForClose(bobEvents, 5000)).toBe("remote-disconnect");
 			} finally {
 				alice.close();
 				bob.close();
@@ -170,20 +194,20 @@ describe("PeerConnection", () => {
 				await alice.startListening(0);
 				await bob.startListening(0);
 
-				const states: string[] = [];
-				alice.onStateChange((state) => states.push(state));
+				const events: ConnectionEvent[] = [];
+				alice.onStateChange((event) => events.push(event));
 
 				// First handshake.
 				await alice.connect("127.0.0.1", bob.getSignalingPort());
-				await waitForState(states, "connected");
+				await waitForState(events, "connected");
 
 				// Simulate abrupt network death on alice's side. Unlike
-				// `disconnect()` (which detaches the forwarders first),
-				// `_forceClosePc()` is the raw escape hatch that lets
-				// pc.close()'s terminal event reach our listener — that's
-				// the path the reconnect logic in App.tsx has to handle.
+				// `closeGracefully()` (which sends a bye first), this is the
+				// raw escape hatch: no intent reaches the wire, so the
+				// terminal event carries reason "network" — the one case the
+				// reconnect logic in App.tsx is allowed to retry.
 				alice._forceCloseActivePc();
-				await waitForAnyState(states, ["disconnected", "closed", "failed"]);
+				expect(await waitForClose(events)).toBe("network");
 
 				// Release the dead session's transport + heartbeat so the
 				// next handshake's UDP/STUN resources don't collide with
@@ -195,20 +219,19 @@ describe("PeerConnection", () => {
 				// late close on the dead pc still reaches the app — the
 				// `terminated` flag suppresses that anyway). For the test
 				// it means the dead pc's "closed" already counts toward
-				// the state buffer; we re-subscribe a fresh listener for
+				// the event buffer; we re-subscribe a fresh listener for
 				// the second session so we only count its "connected".
-				const freshStates: string[] = [];
-				const unsub = alice.onStateChange((s) => freshStates.push(s));
+				const freshEvents: ConnectionEvent[] = [];
+				const unsub = alice.onStateChange((e) => freshEvents.push(e));
 
 				// Second dial on the SAME PeerConnection — this is the
 				// user-reported bug, in single-process form.
 				await alice.connect("127.0.0.1", bob.getSignalingPort());
-				await waitForCount(freshStates, "connected", 1, 5000);
+				await waitForCount(freshEvents, "connected", 1, 5000);
 				unsub();
 
 				// Expect TWO "connected" emissions (one per Session).
-				const connectedCount = states.filter((s) => s === "connected").length;
-				expect(connectedCount).toBeGreaterThanOrEqual(2);
+				expect(countState(events, "connected")).toBeGreaterThanOrEqual(2);
 			} finally {
 				alice.close();
 				bob.close();
@@ -217,39 +240,3 @@ describe("PeerConnection", () => {
 		});
 	});
 });
-
-async function waitForState(states: string[], target: string, timeoutMs = 2000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		if (states.includes(target)) return;
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
-	throw new Error(`timed out waiting for state "${target}", saw: ${states.join(",")}`);
-}
-
-async function waitForAnyState(
-	states: string[],
-	targets: readonly string[],
-	timeoutMs = 2000,
-): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		if (states.some((s) => targets.includes(s))) return;
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
-	throw new Error(`timed out waiting for one of [${targets.join(",")}], saw: ${states.join(",")}`);
-}
-
-async function waitForCount(
-	states: string[],
-	target: string,
-	count: number,
-	timeoutMs = 2000,
-): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		if (states.filter((s) => s === target).length >= count) return;
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
-	throw new Error(`timed out waiting for ${count}×"${target}", saw: ${states.join(",")}`);
-}

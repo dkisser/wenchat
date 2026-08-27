@@ -50,6 +50,13 @@ export class DiscoveryService {
 	private peers: Record<string, PeerInfo> = {};
 	private listeners: Set<(peers: PeerInfo[]) => void> = new Set();
 	private localId: string;
+	// Idempotent `stop()`: the CLI's `/exit` calls `stop()` once and the
+	// mount-effect cleanup runs it again during unmount. Without the guard
+	// we'd call bonjour-service's `stop()` twice — `bonjour-service` logs
+	// an internal error on the second call that the call-site's
+	// `.catch(() => {})` silently swallows, but the callback still
+	// schedules work that runs after the process has logically exited.
+	private stopped = false;
 
 	constructor(bonjour?: BonjourLike, options: DiscoveryServiceOptions = {}) {
 		this.bonjour =
@@ -125,6 +132,9 @@ export class DiscoveryService {
 	}
 
 	async stop(): Promise<void> {
+		// Idempotent — see the `stopped` field's note.
+		if (this.stopped) return;
+		this.stopped = true;
 		return new Promise((resolve) => {
 			this.browser?.stop();
 			if (this.service) {

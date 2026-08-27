@@ -1,0 +1,372 @@
+import { describe, expect, it } from "bun:test";
+import type { CloseReason } from "@wenchat/core";
+import type { PeerInfo } from "@wenchat/protocol";
+import {
+	type ConnectionPhase,
+	type Effect,
+	IDLE_PHASE,
+	MAX_RECONNECT_ATTEMPTS,
+	RECONNECT_BACKOFF_MS,
+	reduce,
+	toStatusBarStatus,
+} from "../src/connectionMachine";
+
+const alice: PeerInfo = {
+	id: "alice-id",
+	displayName: "alice",
+	signalingHost: "192.168.1.10",
+	signalingPort: 4242,
+};
+
+const manual: PeerInfo = {
+	id: "manual",
+	displayName: "192.168.1.11:5000",
+	signalingHost: "192.168.1.11",
+	signalingPort: 5000,
+};
+
+const ONLINE: ConnectionPhase = { kind: "online", peer: alice };
+const DIALING: ConnectionPhase = { kind: "dialing", peer: alice };
+const RETRYING: ConnectionPhase = { kind: "retrying", peer: alice, attempt: 1 };
+
+function kinds(effects: readonly Effect[]): readonly string[] {
+	return effects.map((e) => e.kind);
+}
+
+function messages(effects: readonly Effect[]): readonly string[] {
+	return effects.flatMap((e) => (e.kind === "system-message" ? [e.text] : []));
+}
+
+function closed(reason: CloseReason) {
+	return { kind: "wire", event: { state: "closed", reason } } as const;
+}
+
+const RETRYABLE: readonly CloseReason[] = ["network", "heartbeat-timeout"];
+const FINAL: readonly CloseReason[] = [
+	"local-exit",
+	"local-disconnect",
+	"remote-exit",
+	"remote-disconnect",
+];
+
+describe("connectionMachine — the retry gate", () => {
+	// This is the regression the whole close-reason mechanism exists for.
+	// A peer that leaves on purpose must never put us in a redial loop.
+	for (const reason of FINAL) {
+		it(`never schedules a retry for "${reason}"`, () => {
+			for (const phase of [ONLINE, DIALING, RETRYING]) {
+				const { phase: next, effects } = reduce(phase, closed(reason));
+				expect(kinds(effects)).not.toContain("schedule-retry");
+				expect(next).toEqual(IDLE_PHASE);
+			}
+		});
+	}
+
+	for (const reason of RETRYABLE) {
+		it(`schedules a retry for "${reason}"`, () => {
+			const { phase: next, effects } = reduce(ONLINE, closed(reason));
+			expect(kinds(effects)).toContain("schedule-retry");
+			expect(next).toEqual({ kind: "retrying", peer: alice, attempt: 1 });
+		});
+	}
+
+	it("cleans up in-flight transfers on every terminal reason", () => {
+		for (const reason of [...RETRYABLE, ...FINAL]) {
+			expect(kinds(reduce(ONLINE, closed(reason)).effects)).toContain("dispose-transfers");
+		}
+	});
+
+	// A retryable close during a USER-INITIATED dial is still a user-initiated
+	// failure — auto-retrying would betray the `dial-failed` contract.
+	for (const reason of RETRYABLE) {
+		it(`does not auto-retry a user-initiated dial that closed as "${reason}"`, () => {
+			const { phase, effects } = reduce(DIALING, closed(reason));
+			expect(phase).toEqual(IDLE_PHASE);
+			expect(kinds(effects)).not.toContain("schedule-retry");
+			// Transport failures during a hand-rolled dial surface as a chat-log
+			// failure message. Was previously un-asserted; the regression behind
+			// findings #1/#9 of PR #5 (a hardcoded `farewellText("network")`
+			// path printing "Failed to connect" on `/disconnect` too) caught here.
+			expect(messages(effects)).toEqual(["Failed to connect to alice (192.168.1.10:4242)"]);
+		});
+	}
+
+	// Final reasons during a user-initiated dial carry NO chat-log message:
+	// `local-*` were already printed by the user-* handler; `remote-*` never
+	// reached `connected`, so there is nothing to describe.
+	for (const reason of FINAL) {
+		it(`emits no extra chat message for a user-initiated dial closed as "${reason}"`, () => {
+			expect(messages(reduce(DIALING, closed(reason)).effects)).toEqual([]);
+		});
+	}
+
+	it("goes idle on a terminal event with no peer, without messaging", () => {
+		const { phase, effects } = reduce(IDLE_PHASE, closed("network"));
+		expect(phase).toEqual(IDLE_PHASE);
+		expect(messages(effects)).toEqual([]);
+	});
+});
+
+describe("connectionMachine — farewell wording", () => {
+	const cases: ReadonlyArray<readonly [CloseReason, string]> = [
+		["remote-exit", "alice left the chat."],
+		["remote-disconnect", "alice disconnected."],
+	];
+
+	for (const [reason, text] of cases) {
+		it(`"${reason}" reads as "${text}"`, () => {
+			expect(messages(reduce(ONLINE, closed(reason)).effects)).toEqual([text]);
+		});
+	}
+
+	// LOCAL-* reasons are printed synchronously by the user-* handlers
+	// (see `user-disconnect`/`user-exit`). Re-printing on the wire event
+	// would emit the same string twice.
+	for (const reason of ["local-disconnect", "local-exit"] as const) {
+		it(`does not duplicate the notice for "${reason}"`, () => {
+			expect(messages(reduce(ONLINE, closed(reason)).effects)).toEqual([]);
+		});
+	}
+
+	it("names a manually dialed peer by endpoint", () => {
+		const phase: ConnectionPhase = { kind: "online", peer: manual };
+		expect(messages(reduce(phase, closed("remote-exit")).effects)).toEqual([
+			"192.168.1.11:5000 left the chat.",
+		]);
+	});
+});
+
+describe("connectionMachine — user-disconnect prints immediately", () => {
+	// `closeGracefully` waits up to 400ms for the bye to drain before closing
+	// the pc; the terminal event arrives after. To avoid a 400ms feedback gap,
+	// the user-disconnect path emits the notice synchronously rather than
+	// waiting for the wire event.
+	it("prints 'Disconnected from …' synchronously when online", () => {
+		expect(messages(reduce(ONLINE, { kind: "user-disconnect" }).effects)).toEqual([
+			"Disconnected from alice (192.168.1.10:4242)",
+		]);
+	});
+
+	it("prints nothing on a manual disconnect while idle", () => {
+		const { phase, effects } = reduce(IDLE_PHASE, { kind: "user-disconnect" });
+		expect(phase).toEqual(IDLE_PHASE);
+		expect(messages(effects)).toEqual(["Not connected"]);
+	});
+
+	it("still cancels any pending retry on disconnect", () => {
+		expect(kinds(reduce(RETRYING, { kind: "user-disconnect" }).effects)).toContain("cancel-retry");
+	});
+});
+
+describe("connectionMachine — backoff progression", () => {
+	it("walks the backoff table across successive failures", () => {
+		let phase: ConnectionPhase = ONLINE;
+		const delays: number[] = [];
+
+		const first = reduce(phase, closed("network"));
+		phase = first.phase;
+		delays.push(delayOf(first.effects));
+
+		for (let i = 1; i < MAX_RECONNECT_ATTEMPTS; i++) {
+			const round = reduce(phase, { kind: "dial-failed" });
+			phase = round.phase;
+			delays.push(delayOf(round.effects));
+		}
+
+		expect(delays).toEqual([...RECONNECT_BACKOFF_MS]);
+		expect(phase).toEqual({ kind: "retrying", peer: alice, attempt: MAX_RECONNECT_ATTEMPTS });
+	});
+
+	it("gives up after the table is exhausted", () => {
+		const exhausted: ConnectionPhase = {
+			kind: "retrying",
+			peer: alice,
+			attempt: MAX_RECONNECT_ATTEMPTS,
+		};
+		const { phase, effects } = reduce(exhausted, { kind: "dial-failed" });
+		expect(phase).toEqual(IDLE_PHASE);
+		expect(kinds(effects)).not.toContain("schedule-retry");
+		expect(messages(effects)[0]).toContain(`failed after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+	});
+
+	it("dials on the timer, freeing the dead session first", () => {
+		const { phase, effects } = reduce(RETRYING, { kind: "retry-fired" });
+		expect(phase).toEqual(RETRYING);
+		expect(kinds(effects)).toEqual(["close-active-session", "dial"]);
+	});
+
+	it("ignores a stray timer outside the retry phase", () => {
+		expect(reduce(ONLINE, { kind: "retry-fired" }).effects).toEqual([]);
+	});
+});
+
+describe("connectionMachine — user actions", () => {
+	it("refuses to dial while a session is live or being retried", () => {
+		for (const phase of [ONLINE, DIALING, RETRYING]) {
+			const { phase: next, effects } = reduce(phase, { kind: "dial", peer: manual });
+			expect(next).toEqual(phase);
+			expect(kinds(effects)).toEqual(["system-message"]);
+			expect(messages(effects)[0]).toContain("Run /disconnect first");
+		}
+	});
+
+	it("dials from idle, invalidating any in-flight handshake", () => {
+		const { phase, effects } = reduce(IDLE_PHASE, { kind: "dial", peer: alice });
+		expect(phase).toEqual(DIALING);
+		expect(kinds(effects)).toEqual(["cancel-retry", "invalidate-dials", "dial"]);
+	});
+
+	it("does NOT auto-retry a user-initiated dial that failed", () => {
+		const { phase, effects } = reduce(DIALING, { kind: "dial-failed" });
+		expect(phase).toEqual(IDLE_PHASE);
+		expect(kinds(effects)).not.toContain("schedule-retry");
+		expect(messages(effects)[0]).toBe("Failed to connect to alice (192.168.1.10:4242)");
+	});
+
+	it("closes gracefully on /disconnect and lets the wire event finish the job", () => {
+		const { phase, effects } = reduce(ONLINE, { kind: "user-disconnect" });
+		// Phase deliberately unchanged: the terminal event is the single
+		// source of truth for the TRANSITION. The notice, however, is printed
+		// here, not on the wire event — otherwise the user sees nothing for
+		// up to 400ms while the bye drains.
+		expect(phase).toEqual(ONLINE);
+		expect(effects).toContainEqual({ kind: "close-graceful", reason: "local-disconnect" });
+		expect(messages(effects)).toEqual(["Disconnected from alice (192.168.1.10:4242)"]);
+	});
+
+	it("reports /disconnect with nothing connected", () => {
+		const { effects } = reduce(IDLE_PHASE, { kind: "user-disconnect" });
+		expect(messages(effects)).toEqual(["Not connected"]);
+	});
+
+	it("closes gracefully AND cancels retry AND invalidates dials AND disposes transfers on /exit", () => {
+		// All four effects are load-bearing — `cancel-retry` stops a pending
+		// backoff timer before it can fire into a torn-down PeerConnection,
+		// `invalidate-dials` makes a late `connect()` resolve stale so it
+		// cannot install a session after we close, and `dispose-transfers`
+		// stops a chunked file mid-stream from consuming a temp file forever.
+		// (Previously the test only asserted `close-graceful`; the rest of
+		// the guarantee was unverified.)
+		const { phase, effects } = reduce(ONLINE, { kind: "user-exit" });
+		expect(phase).toEqual(ONLINE);
+		expect(effects).toContainEqual({ kind: "close-graceful", reason: "local-exit" });
+		expect(effects).toContainEqual({ kind: "cancel-retry" });
+		expect(effects).toContainEqual({ kind: "invalidate-dials" });
+		expect(effects).toContainEqual({ kind: "dispose-transfers" });
+		expect(messages(effects)).toEqual(["Disconnected from alice (192.168.1.10:4242)"]);
+	});
+
+	it("prints 'Reconnect cancelled. Disconnected from …' when /exit interrupts a retry", () => {
+		expect(messages(reduce(RETRYING, { kind: "user-exit" }).effects)).toEqual([
+			"Reconnect cancelled. Disconnected from alice (192.168.1.10:4242)",
+		]);
+	});
+
+	it("emits no chat-log message on /exit while idle", () => {
+		// Nothing was connected; exit has nothing to say.
+		expect(messages(reduce(IDLE_PHASE, { kind: "user-exit" }).effects)).toEqual([]);
+	});
+
+	it("cancels a pending retry", () => {
+		const { phase, effects } = reduce(RETRYING, { kind: "user-cancel" });
+		expect(phase).toEqual(IDLE_PHASE);
+		expect(kinds(effects)).toContain("cancel-retry");
+		expect(messages(effects)).toEqual(["Reconnect cancelled."]);
+	});
+
+	it("reports /cancel with no retry in progress", () => {
+		for (const phase of [IDLE_PHASE, ONLINE, DIALING]) {
+			const { phase: next, effects } = reduce(phase, { kind: "user-cancel" });
+			expect(next).toEqual(phase);
+			expect(messages(effects)).toEqual(["No reconnect in progress."]);
+		}
+	});
+
+	it("lets an inbound offer preempt a queued retry", () => {
+		const { phase, effects } = reduce(RETRYING, { kind: "incoming", peer: manual });
+		expect(phase).toEqual({ kind: "dialing", peer: manual });
+		expect(kinds(effects)).toEqual(["cancel-retry", "invalidate-dials"]);
+	});
+
+	it("does not invalidate dials for an inbound offer while idle", () => {
+		const { phase, effects } = reduce(IDLE_PHASE, { kind: "incoming", peer: alice });
+		expect(phase).toEqual(DIALING);
+		expect(kinds(effects)).toEqual(["cancel-retry"]);
+	});
+
+	it("invalidates an in-flight manual dial when an inbound offer arrives", () => {
+		// Finding #8 of PR #5: a `/connect` was racing with an incoming B,
+		// both handshakes ran, the second to resolve teardown the first — the
+		// user's incoming peer died. The fix: invalidate-dials fires whenever
+		// a peer beats our in-flight dial, not only when it beats a RETRY.
+		const { phase, effects } = reduce(DIALING, { kind: "incoming", peer: manual });
+		expect(phase).toEqual({ kind: "dialing", peer: manual });
+		expect(kinds(effects)).toEqual(["cancel-retry", "invalidate-dials"]);
+	});
+
+	// /reconnect's intent — "skip the wait, dial now" — only makes sense while
+	// a retry is armed. In any other phase it must be a no-op with feedback.
+	for (const phase of [IDLE_PHASE, ONLINE, DIALING]) {
+		it(`reports "No reconnect in progress" when /reconnect runs while ${phase.kind}`, () => {
+			const { phase: next, effects } = reduce(phase, { kind: "retry-now" });
+			expect(next).toEqual(phase);
+			expect(kinds(effects)).toEqual(["system-message"]);
+			expect(messages(effects)).toEqual(["No reconnect in progress."]);
+		});
+	}
+
+	it("cancels the retry timer and redials the same peer when /reconnect skips a wait", () => {
+		// Finding #6 of PR #5: /reconnect during a retry was rejected with
+		// "Already connected. Run /disconnect first." — confusable UX for a
+		// command whose meaning is "do the retry now, same target".
+		const { phase, effects } = reduce(RETRYING, { kind: "retry-now" });
+		expect(phase).toEqual(RETRYING);
+		expect(kinds(effects)).toEqual(["cancel-retry", "close-active-session", "dial"]);
+	});
+});
+
+describe("connectionMachine — connected transition", () => {
+	it("goes online and clears any pending retry", () => {
+		const { phase, effects } = reduce(RETRYING, {
+			kind: "wire",
+			event: { state: "connected" },
+		});
+		expect(phase).toEqual(ONLINE);
+		expect(kinds(effects)).toEqual(["cancel-retry", "system-message"]);
+		expect(messages(effects)).toEqual(["Connected to alice (192.168.1.10:4242)"]);
+	});
+
+	it("ignores connected with no peer known", () => {
+		const { phase, effects } = reduce(IDLE_PHASE, {
+			kind: "wire",
+			event: { state: "connected" },
+		});
+		expect(phase).toEqual(IDLE_PHASE);
+		expect(effects).toEqual([]);
+	});
+
+	it("treats a bare connecting event as a no-op", () => {
+		for (const phase of [IDLE_PHASE, ONLINE, DIALING, RETRYING]) {
+			const result = reduce(phase, { kind: "wire", event: { state: "connecting" } });
+			expect(result.phase).toEqual(phase);
+			expect(result.effects).toEqual([]);
+		}
+	});
+});
+
+describe("toStatusBarStatus", () => {
+	it("maps every phase onto the four-value status bar union", () => {
+		expect(toStatusBarStatus(IDLE_PHASE)).toBe("offline");
+		expect(toStatusBarStatus(DIALING)).toBe("connecting");
+		expect(toStatusBarStatus(ONLINE)).toBe("online");
+		expect(toStatusBarStatus(RETRYING)).toBe("reconnecting");
+	});
+});
+
+function delayOf(effects: readonly Effect[]): number {
+	const scheduled = effects.find((e) => e.kind === "schedule-retry");
+	if (!scheduled || scheduled.kind !== "schedule-retry") {
+		throw new Error(`no schedule-retry effect in [${kinds(effects).join(",")}]`);
+	}
+	return scheduled.delayMs;
+}

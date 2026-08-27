@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import {
+	type ByeMessage,
 	type Message,
 	type PingMessage,
 	type PongMessage,
 	type TextMessage,
+	createBye,
 	createPing,
 	createPong,
 } from "../src/message";
@@ -83,5 +85,39 @@ describe("message types", () => {
 		const pong = createPong("nonce-xyz");
 		expect(pong.type).toBe("pong");
 		expect(pong.payload.nonce).toBe("nonce-xyz");
+	});
+
+	it("bye message carries the teardown reason", () => {
+		const msg: ByeMessage = {
+			type: "bye",
+			id: "b-1",
+			timestamp: Date.now(),
+			payload: { reason: "exit" },
+		};
+		expect(msg.type).toBe("bye");
+		expect(msg.payload.reason).toBe("exit");
+	});
+
+	it("message union includes bye", () => {
+		const bye: Message = {
+			type: "bye",
+			id: "b-u",
+			timestamp: 0,
+			payload: { reason: "disconnect" },
+		};
+		expect(bye.type).toBe("bye");
+	});
+
+	it("createBye generates id and timestamp and echoes the reason", () => {
+		const bye = createBye("disconnect");
+		expect(bye.type).toBe("bye");
+		expect(bye.payload.reason).toBe("disconnect");
+		expect(typeof bye.id).toBe("string");
+		expect(bye.id.length).toBeGreaterThan(0);
+		expect(typeof bye.timestamp).toBe("number");
+	});
+
+	it("createBye supports the exit reason", () => {
+		expect(createBye("exit").payload.reason).toBe("exit");
 	});
 });

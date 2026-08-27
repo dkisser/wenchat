@@ -1,4 +1,5 @@
 import type { FileChunkFramePayload, Message } from "@wenchat/protocol";
+import type { CloseReason, ConnectionEvent } from "./connectionState";
 import type { SendFileOptions, SendFileResult } from "./fileTransfer";
 import { getLogger } from "./logger";
 import { Session } from "./session";
@@ -7,6 +8,27 @@ import { type IceCandidatePayload, type SdpPayload, SignalingServer } from "./si
 function errorText(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
+
+/**
+ * Upper bound on how long a graceful close waits for the `bye` to leave the
+ * data channel before killing the pc under it. `sendBye` only queues bytes
+ * in werift's channel; `pc.close()` right after would discard them, and a
+ * dropped `bye` means the peer falls back to auto-redialing a peer that
+ * deliberately left — an intermittent version of the very bug this fixes.
+ * On a LAN the flush is sub-millisecond, so this ceiling is pure insurance.
+ */
+const BYE_FLUSH_TIMEOUT_MS = 200;
+
+/**
+ * How long to let a still-negotiating data channel come up before giving up
+ * on the `bye`. `connect()` resolves once the answer SDP is applied, which
+ * can be before SCTP has the channel open — a `/disconnect` inside that
+ * window would otherwise drop the bye and leave the peer redialing us.
+ */
+const BYE_OPEN_TIMEOUT_MS = 200;
+
+/** Poll interval for the flush wait — short, since we expect one tick at most. */
+const BYE_FLUSH_POLL_MS = 5;
 
 /**
  * Information surfaced to app code when a remote peer sends an offer
@@ -53,8 +75,24 @@ export class PeerConnection {
 
 	private messageListeners: Set<(message: Message) => void> = new Set();
 	private chunkListeners: Set<(chunk: FileChunkFramePayload) => void> = new Set();
-	private stateListeners: Set<(state: string) => void> = new Set();
+	private stateListeners: Set<(event: ConnectionEvent) => void> = new Set();
 	private incomingListeners: Set<(info: IncomingOfferInfo) => void> = new Set();
+
+	/**
+	 * Most recent teardown intent set by {@link closeGracefully},
+	 * {@link close}, or {@link disconnect}. A late `connect()` that
+	 * resolves stale (see {@link closeStaleDialSession}) reads this so
+	 * the resulting close carries the user's reason — without it, the
+	 * default `"network"` would have the state machine retry a peer the
+	 * user already /disconnected from, surfacing as a duplicate
+	 * "Failed to connect to X" alongside the disconnect notice.
+	 *
+	 * Set before any close-path can yield, so the value is observable to
+	 * `closeStaleDialSession` even when the close is racing an in-flight
+	 * `connect()` (the user typed /disconnect mid-dial). Held across
+	 * later closes — successive calls overwrite with the latest intent.
+	 */
+	private closeIntent: CloseReason | null = null;
 
 	// The host:port we tell the remote peer to use when signaling back
 	// to us. Defaults to loopback but LAN-mode callers override it.
@@ -129,7 +167,7 @@ export class PeerConnection {
 		return this.signaling.getPort();
 	}
 
-	async connect(peerHost: string, peerPort: number): Promise<void> {
+	async connect(peerHost: string, peerPort: number): Promise<Session> {
 		const newSession = await Session.initiate({
 			signaling: this.signaling,
 			localHost: this.localSignalingHost,
@@ -138,6 +176,12 @@ export class PeerConnection {
 			remotePort: peerPort,
 		});
 		this.swapSession(newSession);
+		// The returned session lets the caller close ITS OWN session if it
+		// turns out to be a stale resolve (a later `connect()` already
+		// swapped it out). Without this, `closeActiveSession()` operated on
+		// `this.session` (whatever is current) — in a race with an incoming
+		// offer, the stale check would tear down the user's incoming peer.
+		return newSession;
 	}
 
 	send(message: Message): void {
@@ -177,7 +221,7 @@ export class PeerConnection {
 		};
 	}
 
-	onStateChange(callback: (state: string) => void): () => void {
+	onStateChange(callback: (event: ConnectionEvent) => void): () => void {
 		this.stateListeners.add(callback);
 		return () => {
 			this.stateListeners.delete(callback);
@@ -198,10 +242,16 @@ export class PeerConnection {
 		};
 	}
 
+	/**
+	 * Hard teardown: close the active session and stop the signaling server.
+	 * Synchronous, so any queued `bye` may be discarded — use
+	 * {@link closeGracefully} on the user-facing `/exit` path and keep this
+	 * for unmount/cleanup, where the listeners are already detached and
+	 * nobody is left to inform.
+	 */
 	close(): void {
-		// Detach forwarders BEFORE closing the session so a "closed"
-		// event fired during teardown doesn't reach our listeners.
-		this.detachActiveSession();
+		this.closeIntent = "local-exit";
+		this.closeSession("local-exit");
 		this.signaling.stop().catch(() => {});
 	}
 
@@ -211,13 +261,79 @@ export class PeerConnection {
 	 * via {@link connect} or accept incoming offers. Safe to call when no
 	 * session is active — it's a no-op in that case.
 	 *
-	 * Detaches the forwarders BEFORE closing the session so a "closed" event
-	 * fired during async pc teardown doesn't reach our listeners (which
-	 * would otherwise flip the local UI to "Lost connection to …" for a
-	 * disconnect the local user just initiated).
+	 * The terminal event this produces DOES reach `onStateChange` listeners,
+	 * carrying `reason: "local-disconnect"`. That is deliberate: an earlier
+	 * version detached the forwarders first so a local teardown was invisible
+	 * to the app, which meant "was this intentional?" was encoded as the
+	 * absence of an event. That side channel could not express the remote
+	 * case at all — a peer's `/disconnect` was indistinguishable from a
+	 * Wi-Fi drop — so the reason now travels with the event instead.
 	 */
 	disconnect(): void {
-		this.detachActiveSession();
+		this.closeIntent = "local-disconnect";
+		this.closeSession("local-disconnect");
+	}
+
+	/**
+	 * Send a `bye`, give it a bounded window to leave the wire, then close.
+	 * Use this wherever the peer should learn the teardown was intentional
+	 * (`/exit`, `/disconnect`); it is the difference between the far end
+	 * saying "they left" and burning a 28-second redial window.
+	 *
+	 * `stopSignaling` mirrors the {@link close} vs {@link disconnect} split.
+	 */
+	async closeGracefully(
+		reason: "local-exit" | "local-disconnect",
+		stopSignaling = reason === "local-exit",
+	): Promise<void> {
+		// Set the intent BEFORE any await so a `connect()` that resolves
+		// stale during the bufferedAmount wait reads the right reason out of
+		// `closeStaleDialSession`. See `closeIntent`'s note.
+		this.closeIntent = reason;
+		const session = this.session;
+		if (session) {
+			// A channel that is still "connecting" (SCTP association coming up
+			// right after the handshake) would silently swallow the bye, and
+			// the peer would fall back to redialing us. Wait it out — bounded,
+			// and a no-op in the normal case where the channel is long open.
+			await this.waitUntil(() => session.canSendBye, BYE_OPEN_TIMEOUT_MS);
+			// A concurrent `swapSession` (e.g. an incoming offer racing our
+			// teardown, or a retry's `close-active-session` + `connect`) could
+			// have replaced `this.session` while we were waiting. Bail out so
+			// we do not send a bye on a session the peer no longer shares, or
+			// tear down a session that belongs to someone else's call.
+			if (this.session !== session) return;
+			session.sendBye(reason === "local-exit" ? "exit" : "disconnect");
+			// `sendBye` only queues bytes; `pc.close()` right after would
+			// discard them.
+			await this.waitUntil(() => session.bufferedAmount === 0, BYE_FLUSH_TIMEOUT_MS);
+			if (this.session !== session) return;
+		}
+		this.closeSession(reason);
+		if (stopSignaling) {
+			// Fire-and-forget: `server.close()` only invokes its callback
+			// once every open connection has gone away, and a peer holding
+			// a keep-alive socket can stall that indefinitely. The `/exit`
+			// path awaits this method before Ink's `exit()`, so awaiting
+			// would hang the whole shutdown behind a remote socket.
+			this.signaling.stop().catch(() => {});
+		}
+	}
+
+	/**
+	 * Poll `condition` until it holds or `timeoutMs` elapses. Never rejects: a
+	 * missed deadline degrades the bye to best-effort, it does not block the
+	 * close the user asked for.
+	 */
+	private async waitUntil(condition: () => boolean, timeoutMs: number): Promise<void> {
+		const ticks = Math.ceil(timeoutMs / BYE_FLUSH_POLL_MS);
+		for (let tick = 0; tick < ticks; tick++) {
+			if (condition()) return;
+			await new Promise<void>((resolve) => setTimeout(resolve, BYE_FLUSH_POLL_MS));
+		}
+		if (!condition()) {
+			getLogger().warn({ timeoutMs }, "bye deadline missed — closing anyway");
+		}
 	}
 
 	/**
@@ -231,24 +347,60 @@ export class PeerConnection {
 	 * the new pc's ICE gather stalls permanently in "checking" — the
 	 * user's reported "have to restart both sides" symptom.
 	 *
-	 * We deliberately do NOT detach the forwarders first the way
-	 * {@link disconnect} does: the dead session's `terminated` flag
-	 * already suppresses late terminal events, and the next `connect`
-	 * will swap in a fresh session whose listeners are wired in the same
-	 * `swapSession` pass that swaps the session reference.
+	 * The dead session's `terminated` flag already suppressed its terminal
+	 * event, so closing it again here emits nothing.
+	 *
+	 * **Identity guarantee:** if the caller wants to close a SPECIFIC
+	 * session (the one this method's caller just created, say) rather than
+	 * whatever happens to be current on `this.session`, use {@link closeSession}.
+	 * This method is intentionally identity-less because every existing
+	 * caller (the retry-timer path in the CLI) belongs to the redundant
+	 * "kill the previous round's session" flow and is happy with "current".
 	 */
 	closeActiveSession(): void {
 		this.session?.close();
 		this.session = undefined;
 	}
 
-	private detachActiveSession(): void {
-		for (const unsubscribe of this.sessionUnsubscribers) {
-			unsubscribe();
+	/**
+	 * Close a SPECIFIC session — the one the caller created or holds a
+	 * reference to — regardless of whether `this.session` still points to
+	 * it. The session's `terminated` flag makes a second close a no-op,
+	 * so this is safe even if the session has already been torn down
+	 * (e.g. by `swapSession` during a race).
+	 *
+	 * If the session is still `this.session`, the active session is closed
+	 * AND the reference is forgotten. This is what callers reaching for
+	 * "close my own session" want when their late `connect()` resolves
+	 * under a generation that has since moved — closing THIS specific
+	 * session lets the swap-installed peer stay alive instead of being
+	 * torn down by `closeActiveSession`, which would target the now-current
+	 * session.
+	 */
+	closeStaleDialSession(session: Session): void {
+		// Honor any teardown intent observed since the stale dial started.
+		// Without this, a `/disconnect` or `/exit` issued during a connect
+		// would race: this method would close the new session with
+		// `reason = "network"` (the default), and the state machine would
+		// interpret that as retryable — "Failed to connect to X" right
+		// alongside the user's actual disconnect notice.
+		const reason = this.closeIntent ?? "network";
+		if (this.session === session) {
+			session.close(reason);
+			this.session = undefined;
+			return;
 		}
-		this.sessionUnsubscribers = [];
+		// Already detached by `swapSession` (or never installed here). The
+		// session's `terminated` flag suppresses a second close event.
+		session.close(reason);
+	}
 
-		this.session?.close();
+	/**
+	 * Close the active session with an explicit reason and forget it. The
+	 * forwarders stay attached so the terminal event reaches the app.
+	 */
+	private closeSession(reason: "local-exit" | "local-disconnect"): void {
+		this.session?.close(reason);
 		this.session = undefined;
 	}
 
@@ -308,10 +460,10 @@ export class PeerConnection {
 					}
 				}
 			}),
-			newSession.onStateChange((state) => {
+			newSession.onStateChange((event) => {
 				for (const listener of this.stateListeners) {
 					try {
-						listener(state);
+						listener(event);
 					} catch (err) {
 						getLogger().error({ err: errorText(err) }, "state listener threw");
 					}

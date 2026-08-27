@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { TextMessage } from "@wenchat/protocol";
+import { type ConnectionEvent, isRetryable } from "../../src/connectionState";
 import { DiscoveryService } from "../../src/discovery";
 import { PeerConnection } from "../../src/peer";
+import { closeReasons, waitForClose, waitForState } from "../helpers/connectionEvents";
 import { suppressUdpRefused } from "../helpers/udpSuppression";
 
 // Linux CI turns ICMP port-unreachable into ECONNREFUSED on werift's dgram
@@ -19,7 +21,7 @@ afterEach(() => {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-const TERMINAL_STATES = new Set(["disconnected", "closed", "failed"]);
+const TERMINAL_STATES = new Set(["closed"]);
 
 async function waitForCondition(
 	states: string[],
@@ -110,7 +112,7 @@ describe("core integration", () => {
 
 	it("abrupt peer death is reported as a terminal state within ~6s", async () => {
 		const bobStates: string[] = [];
-		bob.onStateChange((state) => bobStates.push(state));
+		bob.onStateChange((e) => bobStates.push(e.state));
 
 		await alice.connect("127.0.0.1", bob.getSignalingPort());
 
@@ -157,7 +159,7 @@ describe("core integration", () => {
 				if (msg.type === "text") bobReceived.push(msg);
 			});
 			const bobStates: string[] = [];
-			const unsubState = bob.onStateChange((s) => bobStates.push(s));
+			const unsubState = bob.onStateChange((e) => bobStates.push(e.state));
 
 			const gotFirst = await waitForMatch(
 				bobReceived,
@@ -193,7 +195,7 @@ describe("core integration", () => {
 				if (msg.type === "text") bobReceived.push(msg);
 			});
 			const bobStates: string[] = [];
-			const unsubState = bob.onStateChange((s) => bobStates.push(s));
+			const unsubState = bob.onStateChange((e) => bobStates.push(e.state));
 
 			await secondAlice.connect("127.0.0.1", bob.getSignalingPort());
 
@@ -228,7 +230,7 @@ describe("core integration", () => {
 	it("receiver's onIncoming fires before onStateChange('connected')", async () => {
 		const bobEvents: string[] = [];
 		bob.onIncoming(() => bobEvents.push("incoming"));
-		bob.onStateChange((s) => bobEvents.push(`state:${s}`));
+		bob.onStateChange((e) => bobEvents.push(`state:${e.state}`));
 
 		await alice.connect("127.0.0.1", bob.getSignalingPort());
 
@@ -259,7 +261,7 @@ describe("core integration", () => {
 			if (msg.type === "text") bobReceived.push(msg);
 		});
 		const bobStates: string[] = [];
-		const unsubState = bob.onStateChange((s) => bobStates.push(s));
+		const unsubState = bob.onStateChange((e) => bobStates.push(e.state));
 
 		// First session.
 		await alice.connect("127.0.0.1", bob.getSignalingPort());
@@ -312,6 +314,72 @@ describe("core integration", () => {
 
 		unsubMessage();
 		unsubState();
+	}, 30000);
+
+	// The regression this whole close-reason mechanism exists for: a peer
+	// that leaves on purpose must NOT put the other end into a reconnect
+	// loop. Before `bye`, alice's /disconnect and alice's Wi-Fi dying
+	// produced the identical event on bob, so bob burned a full 28-second
+	// backoff window redialing a peer that had deliberately hung up.
+	//
+	// Each of these waits for a round-tripped text message, not just for
+	// bob's pc to report `connected`: `connect()` resolves once the answer
+	// SDP is applied, which can be BEFORE alice's data channel is open. A
+	// `bye` sent into a not-yet-open channel is silently dropped (it is
+	// best-effort by design), so asserting on the pc state alone made this
+	// test race the SCTP handshake.
+	async function establishVerifiedSession(): Promise<ConnectionEvent[]> {
+		const bobEvents: ConnectionEvent[] = [];
+		bob.onStateChange((e) => bobEvents.push(e));
+		const bobReceived: TextMessage[] = [];
+		const unsubMessage = bob.onMessage((m) => {
+			if (m.type === "text") bobReceived.push(m);
+		});
+
+		await alice.connect("127.0.0.1", bob.getSignalingPort());
+		await waitForState(bobEvents, "connected", 5000);
+
+		// Round-trip a message so we know the data plane — not just ICE — is
+		// up on BOTH ends before we exercise the teardown.
+		alice.send({
+			type: "text",
+			id: "probe",
+			timestamp: Date.now(),
+			payload: { text: "probe" },
+		});
+		const probe = await waitForMatch(bobReceived, (m) => m.payload.text === "probe", 8000);
+		expect(probe).toBe(true);
+		unsubMessage();
+		return bobEvents;
+	}
+
+	it("a graceful /disconnect reaches the peer as remote-disconnect, not network", async () => {
+		const bobEvents = await establishVerifiedSession();
+
+		await alice.closeGracefully("local-disconnect");
+
+		expect(await waitForClose(bobEvents, 8000)).toBe("remote-disconnect");
+		// Still exactly one terminal event — the `terminated` guard dedupes
+		// the pc-level close that follows the bye.
+		expect(closeReasons(bobEvents)).toEqual(["remote-disconnect"]);
+	}, 30000);
+
+	it("a graceful /exit reaches the peer as remote-exit", async () => {
+		const bobEvents = await establishVerifiedSession();
+
+		await alice.closeGracefully("local-exit");
+
+		expect(await waitForClose(bobEvents, 8000)).toBe("remote-exit");
+	}, 30000);
+
+	it("an abrupt death still reaches the peer as a retryable network close", async () => {
+		// The other half of the contract: making intentional closes
+		// non-retryable must NOT make real network drops non-retryable.
+		const bobEvents = await establishVerifiedSession();
+
+		alice._forceCloseActivePc();
+
+		expect(isRetryable(await waitForClose(bobEvents, 10000))).toBe(true);
 	}, 30000);
 });
 
