@@ -141,15 +141,11 @@ function farewellText(reason: CloseReason, peer: PeerInfo): string | null {
  */
 function scheduleRetry(peer: PeerInfo, attempt: number, extra: readonly Effect[]): Transition {
 	if (attempt > MAX_RECONNECT_ATTEMPTS) {
+		const giveUpMsg = `Reconnect failed after ${MAX_RECONNECT_ATTEMPTS} attempts.`;
+		const giveUpHint = "Try /reconnect or pick another peer.";
 		return {
 			phase: IDLE_PHASE,
-			effects: [
-				...extra,
-				{
-					kind: "system-message",
-					text: `Reconnect failed after ${MAX_RECONNECT_ATTEMPTS} attempts. Try /reconnect or pick another peer.`,
-				},
-			],
+			effects: [...extra, { kind: "system-message", text: `${giveUpMsg} ${giveUpHint}` }],
 		};
 	}
 	const delayMs =

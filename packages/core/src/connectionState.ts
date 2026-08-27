@@ -11,12 +11,18 @@ import type { ByeReason } from "@wenchat/protocol";
  * {@link isRetryable} as the single decision point.
  */
 export type CloseReason =
-	| /** pc went `disconnected`/`failed`, or the data channel died on its own. */ "network"
-	| /** pc still looks alive but no ping/pong landed inside the watchdog window. */ "heartbeat-timeout"
-	| /** We quit the process (`/exit`). */ "local-exit"
-	| /** We dropped this session but stayed in the app (`/disconnect`). */ "local-disconnect"
-	| /** The peer sent a `bye` saying it was quitting. */ "remote-exit"
-	| /** The peer sent a `bye` saying it was dropping the session. */ "remote-disconnect";
+	/** pc went `disconnected`/`failed`, or the data channel died on its own. */
+	| "network"
+	/** pc still looks alive but no ping/pong landed inside the watchdog window. */
+	| "heartbeat-timeout"
+	/** We quit the process (`/exit`). */
+	| "local-exit"
+	/** We dropped this session but stayed in the app (`/disconnect`). */
+	| "local-disconnect"
+	/** The peer sent a `bye` saying it was quitting. */
+	| "remote-exit"
+	/** The peer sent a `bye` saying it was dropping the session. */
+	| "remote-disconnect";
 
 /**
  * Connection state as the app cares about it.

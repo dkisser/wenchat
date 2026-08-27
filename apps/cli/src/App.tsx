@@ -338,7 +338,8 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 
 	const handleHelp = () => {
 		appendSystemMessage(
-			"Magic commands: /exit, /disconnect, /reconnect, /cancel, /mouse, /file <path>, /help, /connect <host:port>, /copy [n]",
+			"Magic commands: /exit, /disconnect, /reconnect, /cancel, /mouse," +
+				" /file <path>, /help, /connect <host:port>, /copy [n]",
 		);
 	};
 
@@ -356,24 +357,31 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		// terminal event that would otherwise carry it may never render. This
 		// is why the machine deliberately stays silent on `local-exit`.
 		const peer = phasePeer(phaseRef.current);
+		const isRetrying = phaseRef.current.kind === "retrying";
 		if (peer) {
-			appendSystemMessage(`Disconnected from ${describePeer(peer)}`);
+			if (isRetrying) {
+				appendSystemMessage(`Reconnect cancelled. Disconnected from ${describePeer(peer)}`);
+			} else {
+				appendSystemMessage(`Disconnected from ${describePeer(peer)}`);
+			}
 		}
-		// Send the bye and give it a bounded window to leave the wire before
-		// the pc goes down — otherwise the peer sees an abrupt close and
-		// spends a full backoff window redialing someone who just quit.
-		void peerConnection.closeGracefully("local-exit").finally(() => {
-			discovery.stop().catch(() => {});
-			// Ink's `exit()` triggers App's componentWillUnmount → final onRender
-			// → cliCursor.show. After the React tree fully unmounts,
-			// `instance.waitUntilExit()` in main.tsx resolves and writes the
-			// alternate-screen exit sequence before terminating the process.
-			// We intentionally do NOT call `process.exit()` here — leaving the
-			// shutdown sequencing to main.tsx keeps the alternate buffer release
-			// and the process exit in the same microtask, so the host terminal
-			// never sees a half-rendered final frame.
-			exit();
-		});
+		// Fire-and-forget the bye: the bounded wait in `closeGracefully` is
+		// irrelevant on this path because the process is about to die
+		// anyway, so the alt-screen release and `exit()` go through
+		// synchronously. `instance.waitUntilExit()` in main.tsx writes the
+		// alternate-screen exit sequence before the bye-drain completes; the
+		// peer's SCTP queue still flushes whatever it can.
+		void peerConnection.closeGracefully("local-exit").catch(() => {});
+		discovery.stop().catch(() => {});
+		// Ink's `exit()` triggers App's componentWillUnmount → final onRender
+		// → cliCursor.show. After the React tree fully unmounts,
+		// `instance.waitUntilExit()` in main.tsx resolves and writes the
+		// alternate-screen exit sequence before terminating the process.
+		// We intentionally do NOT call `process.exit()` here — leaving the
+		// shutdown sequencing to main.tsx keeps the alternate buffer release
+		// and the process exit in the same microtask, so the host terminal
+		// never sees a half-rendered final frame.
+		exit();
 	};
 
 	const handleConnect = (hostPort: string) => {
