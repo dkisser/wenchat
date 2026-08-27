@@ -151,7 +151,7 @@ export class PeerConnection {
 		return this.signaling.getPort();
 	}
 
-	async connect(peerHost: string, peerPort: number): Promise<void> {
+	async connect(peerHost: string, peerPort: number): Promise<Session> {
 		const newSession = await Session.initiate({
 			signaling: this.signaling,
 			localHost: this.localSignalingHost,
@@ -160,6 +160,12 @@ export class PeerConnection {
 			remotePort: peerPort,
 		});
 		this.swapSession(newSession);
+		// The returned session lets the caller close ITS OWN session if it
+		// turns out to be a stale resolve (a later `connect()` already
+		// swapped it out). Without this, `closeActiveSession()` operated on
+		// `this.session` (whatever is current) — in a race with an incoming
+		// offer, the stale check would tear down the user's incoming peer.
+		return newSession;
 	}
 
 	send(message: Message): void {
@@ -321,10 +327,43 @@ export class PeerConnection {
 	 *
 	 * The dead session's `terminated` flag already suppressed its terminal
 	 * event, so closing it again here emits nothing.
+	 *
+	 * **Identity guarantee:** if the caller wants to close a SPECIFIC
+	 * session (the one this method's caller just created, say) rather than
+	 * whatever happens to be current on `this.session`, use {@link closeSession}.
+	 * This method is intentionally identity-less because every existing
+	 * caller (the retry-timer path in the CLI) belongs to the redundant
+	 * "kill the previous round's session" flow and is happy with "current".
 	 */
 	closeActiveSession(): void {
 		this.session?.close();
 		this.session = undefined;
+	}
+
+	/**
+	 * Close a SPECIFIC session — the one the caller created or holds a
+	 * reference to — regardless of whether `this.session` still points to
+	 * it. The session's `terminated` flag makes a second close a no-op,
+	 * so this is safe even if the session has already been torn down
+	 * (e.g. by `swapSession` during a race).
+	 *
+	 * If the session is still `this.session`, the active session is closed
+	 * AND the reference is forgotten. This is what callers reaching for
+	 * "close my own session" want when their late `connect()` resolves
+	 * under a generation that has since moved — closing THIS specific
+	 * session lets the swap-installed peer stay alive instead of being
+	 * torn down by `closeActiveSession`, which would target the now-current
+	 * session.
+	 */
+	closeStaleDialSession(session: Session): void {
+		if (this.session === session) {
+			session.close();
+			this.session = undefined;
+			return;
+		}
+		// Already detached by `swapSession` (or never installed here). The
+		// session's `terminated` flag suppresses a second close event.
+		session.close();
 	}
 
 	/**

@@ -1,4 +1,4 @@
-import type { CloseReason, ConnectionEvent } from "@wenchat/core";
+import type { ConnectionEvent } from "@wenchat/core";
 import { isRetryable } from "@wenchat/core";
 import type { PeerInfo } from "@wenchat/protocol";
 import type { StatusBarStatus } from "@wenchat/ui";
@@ -41,8 +41,15 @@ export type ConnectionPhase =
 	| { readonly kind: "retrying"; readonly peer: PeerInfo; readonly attempt: number };
 
 export type MachineEvent =
-	/** User picked a peer, ran `/connect`, or ran `/reconnect`. */
+	/** User picked a peer, ran `/connect`, or ran `/reconnect` while idle. */
 	| { readonly kind: "dial"; readonly peer: PeerInfo }
+	/**
+	 * User ran `/reconnect` while a retry was armed: same intent as
+	 * "the backoff timer elapsed" but fires now instead of waiting.
+	 * No-op (with feedback) outside a `retrying` phase — the command has
+	 * nothing to skip past.
+	 */
+	| { readonly kind: "retry-now" }
 	/** A peer is dialing us (signaling `/offer` arrived). */
 	| { readonly kind: "incoming"; readonly peer: PeerInfo }
 	/** A `connect()` call rejected. */
@@ -116,23 +123,20 @@ export function describePeer(peer: PeerInfo): string {
 /**
  * What to tell the user about a REMOTE close we are NOT retrying.
  *
- * Local-close notices are printed synchronously by their respective
- * `user-*` handlers — they never reach this function. Returning null on
- * every non-remote reason keeps the switch total and prevents the wire
- * event from re-printing what the user action already said.
+ * Only the two `remote-*` reasons reach this helper:
+ *   - `local-*` notices are printed synchronously by their `user-*`
+ *     handlers, so the wire event must not duplicate them.
+ *   - `network` / `heartbeat-timeout` either retry (no message) or, in
+ *     the dialing branch, get a purpose-specific "Failed to connect" line.
+ *
+ * Earlier revisions carried four unreachable `return null` cases to keep
+ * the switch total; inlining the two real branches here is shorter and
+ * the closed reason makes the callers' intent obvious.
  */
-function farewellText(reason: CloseReason, peer: PeerInfo): string | null {
-	switch (reason) {
-		case "remote-exit":
-			return `${peerLabel(peer)} left the chat.`;
-		case "remote-disconnect":
-			return `${peerLabel(peer)} disconnected.`;
-		case "network":
-		case "heartbeat-timeout":
-		case "local-disconnect":
-		case "local-exit":
-			return null;
-	}
+function farewellText(reason: "remote-exit" | "remote-disconnect", peer: PeerInfo): string {
+	return reason === "remote-exit"
+		? `${peerLabel(peer)} left the chat.`
+		: `${peerLabel(peer)} disconnected.`;
 }
 
 /**
@@ -148,8 +152,9 @@ function scheduleRetry(peer: PeerInfo, attempt: number, extra: readonly Effect[]
 			effects: [...extra, { kind: "system-message", text: `${giveUpMsg} ${giveUpHint}` }],
 		};
 	}
-	const delayMs =
-		RECONNECT_BACKOFF_MS[attempt - 1] ?? RECONNECT_BACKOFF_MS[MAX_RECONNECT_ATTEMPTS - 1];
+	// `attempt` is bounded by the early-return above to `[1, MAX_RECONNECT_ATTEMPTS]`,
+	// so the index is always in range — no `??` fallback needed (it was dead code).
+	const delayMs = RECONNECT_BACKOFF_MS[attempt - 1];
 	const seconds = Math.round(delayMs / 1000);
 	const text =
 		attempt === 1
@@ -191,18 +196,27 @@ function handleWire(phase: ConnectionPhase, event: ConnectionEvent): Transition 
 	if (!peer) {
 		return { phase: IDLE_PHASE, effects: [{ kind: "dispose-transfers" }] };
 	}
-	// A terminal event during a USER-INITIATED dial (retryable reason from a
-	// `dialing` phase) is still a user-initiated failure: do not auto-redial,
-	// which would betray the explicit "user-initiated dials are NOT
-	// auto-retried" contract from the `dial-failed` branch.
+	// A terminal event during a USER-INITIATED dial is still user-initiated:
+	// do not auto-redial (the explicit contract from `dial-failed`).
+	//
+	// The message in this branch has to track `event.reason`:
+	//   - retryable (`network`, `heartbeat-timeout`) → "Failed to connect to X".
+	//     This is the user's signal that THEIR dial failed.
+	//   - final (`local-*`, `remote-*`) → no message. The user action that
+	//     started the final close already printed one (or, for `remote-*`,
+	//     there is nothing to name — we never reached `connected`).
+	//
+	// Previously this branch hardcoded `farewellText("network", peer)`, which
+	// silently suppressed the right wording AND printed "Failed to connect"
+	// for `/disconnect` mid-handshake — a duplicate of the disconnect notice.
 	if (phase.kind === "dialing") {
-		const text = farewellText("network", peer) ?? `Failed to connect to ${describePeer(peer)}`;
+		const text = isRetryable(event.reason) ? `Failed to connect to ${describePeer(peer)}` : null;
 		return {
 			phase: IDLE_PHASE,
 			effects: [
 				{ kind: "dispose-transfers" },
 				{ kind: "cancel-retry" },
-				{ kind: "system-message", text },
+				...(text ? ([{ kind: "system-message", text }] as const) : []),
 			],
 		};
 	}
@@ -216,17 +230,19 @@ function handleWire(phase: ConnectionPhase, event: ConnectionEvent): Transition 
 	// before teardown). Re-printing on the wire event would print the same
 	// string twice. Only REMOTE reasons get a message here — those have no
 	// opportunity to print earlier.
-	const text =
-		event.reason === "remote-exit" || event.reason === "remote-disconnect"
-			? farewellText(event.reason, peer)
-			: null;
+	if (event.reason === "remote-exit" || event.reason === "remote-disconnect") {
+		return {
+			phase: IDLE_PHASE,
+			effects: [
+				{ kind: "dispose-transfers" },
+				{ kind: "cancel-retry" },
+				{ kind: "system-message", text: farewellText(event.reason, peer) },
+			],
+		};
+	}
 	return {
 		phase: IDLE_PHASE,
-		effects: [
-			{ kind: "dispose-transfers" },
-			{ kind: "cancel-retry" },
-			...(text ? ([{ kind: "system-message", text }] as const) : []),
-		],
+		effects: [{ kind: "dispose-transfers" }, { kind: "cancel-retry" }],
 	};
 }
 
@@ -253,12 +269,19 @@ export function reduce(phase: ConnectionPhase, event: MachineEvent): Transition 
 		}
 
 		case "incoming": {
-			// Their offer wins over a retry we had queued: letting both
-			// handshakes run would race two sessions into the same slot.
-			const preempts = phase.kind === "retrying";
+			// Their offer wins over anything we had in flight: a manual dial
+			// (running `connect()` for peer A) and a queued retry (timer
+			// pending) both have to back down so the new session takes the
+			// slot. `invalidate-dials` bumps the generation token; the losing
+			// manual dial's late `connect()` then resolves stale and tears
+			// ITS OWN session down (not whatever the swap installed).
+			//
+			// Older version only checked for `retrying` here, which let a
+			// manual dial racing with an incoming offer leak both sessions.
+			const hadInFlightDial = phase.kind === "retrying" || phase.kind === "dialing";
 			return {
 				phase: { kind: "dialing", peer: event.peer },
-				effects: preempts
+				effects: hadInFlightDial
 					? [{ kind: "cancel-retry" }, { kind: "invalidate-dials" }]
 					: [{ kind: "cancel-retry" }],
 			};
@@ -285,6 +308,26 @@ export function reduce(phase: ConnectionPhase, event: MachineEvent): Transition 
 		case "retry-fired": {
 			if (phase.kind !== "retrying") return stay(phase);
 			return stay(phase, { kind: "close-active-session" }, { kind: "dial", peer: phase.peer });
+		}
+
+		case "retry-now": {
+			// `/reconnect` during a retry: same effect as the timer firing
+			// now. Cancelling the timer here keeps the existing `setTimeout`
+			// from firing the reducer a second time into the same slot.
+			// Anything outside `retrying` has no timer to skip, so
+			// surface feedback rather than starting a new daisy chain.
+			if (phase.kind !== "retrying") {
+				return stay(phase, {
+					kind: "system-message",
+					text: "No reconnect in progress.",
+				});
+			}
+			return stay(
+				phase,
+				{ kind: "cancel-retry" },
+				{ kind: "close-active-session" },
+				{ kind: "dial", peer: phase.peer },
+			);
 		}
 
 		case "wire":
@@ -314,11 +357,31 @@ export function reduce(phase: ConnectionPhase, event: MachineEvent): Transition 
 		}
 
 		case "user-exit": {
+			// Idle path: nothing was connected; the chat log doesn't need a
+			// bookkeeping entry. We still emit `cancel-retry` defensively so
+			// a freshly-armed timer can't fire into a process that's about
+			// to die.
+			if (phase.kind === "idle") {
+				return stay(phase, { kind: "cancel-retry" });
+			}
+			// Non-null safe: covered by the early-return above.
+			const peer = phasePeer(phase);
+			if (!peer) return stay(phase);
+			// Surface the disconnect notice synchronously — same UX detail as
+			// user-disconnect: the user is staring at a terminal about to
+			// close, and `/exit` may not give `closeGracefully` its 400ms to
+			// complete the bye drain before Ink unmounts.
+			const text =
+				phase.kind === "retrying"
+					? `Reconnect cancelled. Disconnected from ${describePeer(peer)}`
+					: `Disconnected from ${describePeer(peer)}`;
 			return stay(
 				phase,
 				{ kind: "cancel-retry" },
 				{ kind: "invalidate-dials" },
+				{ kind: "dispose-transfers" },
 				{ kind: "close-graceful", reason: "local-exit" },
+				{ kind: "system-message", text },
 			);
 		}
 

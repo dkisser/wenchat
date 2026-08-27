@@ -83,6 +83,20 @@ describe("connectionMachine — the retry gate", () => {
 			const { phase, effects } = reduce(DIALING, closed(reason));
 			expect(phase).toEqual(IDLE_PHASE);
 			expect(kinds(effects)).not.toContain("schedule-retry");
+			// Transport failures during a hand-rolled dial surface as a chat-log
+			// failure message. Was previously un-asserted; the regression behind
+			// findings #1/#9 of PR #5 (a hardcoded `farewellText("network")`
+			// path printing "Failed to connect" on `/disconnect` too) caught here.
+			expect(messages(effects)).toEqual(["Failed to connect to alice (192.168.1.10:4242)"]);
+		});
+	}
+
+	// Final reasons during a user-initiated dial carry NO chat-log message:
+	// `local-*` were already printed by the user-* handler; `remote-*` never
+	// reached `connected`, so there is nothing to describe.
+	for (const reason of FINAL) {
+		it(`emits no extra chat message for a user-initiated dial closed as "${reason}"`, () => {
+			expect(messages(reduce(DIALING, closed(reason)).effects)).toEqual([]);
 		});
 	}
 
@@ -225,9 +239,32 @@ describe("connectionMachine — user actions", () => {
 		expect(messages(effects)).toEqual(["Not connected"]);
 	});
 
-	it("sends a bye on /exit", () => {
-		const { effects } = reduce(ONLINE, { kind: "user-exit" });
+	it("closes gracefully AND cancels retry AND invalidates dials AND disposes transfers on /exit", () => {
+		// All four effects are load-bearing — `cancel-retry` stops a pending
+		// backoff timer before it can fire into a torn-down PeerConnection,
+		// `invalidate-dials` makes a late `connect()` resolve stale so it
+		// cannot install a session after we close, and `dispose-transfers`
+		// stops a chunked file mid-stream from consuming a temp file forever.
+		// (Previously the test only asserted `close-graceful`; the rest of
+		// the guarantee was unverified.)
+		const { phase, effects } = reduce(ONLINE, { kind: "user-exit" });
+		expect(phase).toEqual(ONLINE);
 		expect(effects).toContainEqual({ kind: "close-graceful", reason: "local-exit" });
+		expect(effects).toContainEqual({ kind: "cancel-retry" });
+		expect(effects).toContainEqual({ kind: "invalidate-dials" });
+		expect(effects).toContainEqual({ kind: "dispose-transfers" });
+		expect(messages(effects)).toEqual(["Disconnected from alice (192.168.1.10:4242)"]);
+	});
+
+	it("prints 'Reconnect cancelled. Disconnected from …' when /exit interrupts a retry", () => {
+		expect(messages(reduce(RETRYING, { kind: "user-exit" }).effects)).toEqual([
+			"Reconnect cancelled. Disconnected from alice (192.168.1.10:4242)",
+		]);
+	});
+
+	it("emits no chat-log message on /exit while idle", () => {
+		// Nothing was connected; exit has nothing to say.
+		expect(messages(reduce(IDLE_PHASE, { kind: "user-exit" }).effects)).toEqual([]);
 	});
 
 	it("cancels a pending retry", () => {
@@ -255,6 +292,36 @@ describe("connectionMachine — user actions", () => {
 		const { phase, effects } = reduce(IDLE_PHASE, { kind: "incoming", peer: alice });
 		expect(phase).toEqual(DIALING);
 		expect(kinds(effects)).toEqual(["cancel-retry"]);
+	});
+
+	it("invalidates an in-flight manual dial when an inbound offer arrives", () => {
+		// Finding #8 of PR #5: a `/connect` was racing with an incoming B,
+		// both handshakes ran, the second to resolve teardown the first — the
+		// user's incoming peer died. The fix: invalidate-dials fires whenever
+		// a peer beats our in-flight dial, not only when it beats a RETRY.
+		const { phase, effects } = reduce(DIALING, { kind: "incoming", peer: manual });
+		expect(phase).toEqual({ kind: "dialing", peer: manual });
+		expect(kinds(effects)).toEqual(["cancel-retry", "invalidate-dials"]);
+	});
+
+	// /reconnect's intent — "skip the wait, dial now" — only makes sense while
+	// a retry is armed. In any other phase it must be a no-op with feedback.
+	for (const phase of [IDLE_PHASE, ONLINE, DIALING]) {
+		it(`reports "No reconnect in progress" when /reconnect runs while ${phase.kind}`, () => {
+			const { phase: next, effects } = reduce(phase, { kind: "retry-now" });
+			expect(next).toEqual(phase);
+			expect(kinds(effects)).toEqual(["system-message"]);
+			expect(messages(effects)).toEqual(["No reconnect in progress."]);
+		});
+	}
+
+	it("cancels the retry timer and redials the same peer when /reconnect skips a wait", () => {
+		// Finding #6 of PR #5: /reconnect during a retry was rejected with
+		// "Already connected. Run /disconnect first." — confusable UX for a
+		// command whose meaning is "do the retry now, same target".
+		const { phase, effects } = reduce(RETRYING, { kind: "retry-now" });
+		expect(phase).toEqual(RETRYING);
+		expect(kinds(effects)).toEqual(["cancel-retry", "close-active-session", "dial"]);
 	});
 });
 

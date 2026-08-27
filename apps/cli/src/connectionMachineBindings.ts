@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FileReceiver, PeerConnection } from "@wenchat/core";
 import type { Message, PeerInfo, TextMessage } from "@wenchat/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { appendCapped } from "./appendCapped";
 import {
 	type ConnectionPhase,
 	type Effect,
@@ -9,16 +10,6 @@ import {
 	type MachineEvent,
 	reduce,
 } from "./connectionMachine";
-
-/** Cap-then-append, mirroring the local helper in App.tsx (extracted to keep
- *  the hook dependency-free). */
-function appendCapped(previous: Message[], message: TextMessage): Message[] {
-	const MAX_MESSAGES = 2000;
-	if (previous.length >= MAX_MESSAGES) {
-		return [...previous.slice(previous.length - MAX_MESSAGES + 1), message];
-	}
-	return [...previous, message];
-}
 
 /**
  * Hook that turns the pure state machine into the React-shaped interface
@@ -97,12 +88,14 @@ export function useConnectionMachine(
 		async (peer: PeerInfo) => {
 			const myGeneration = connectionGenerationRef.current;
 			try {
-				await peerConnection.connect(peer.signalingHost, peer.signalingPort);
+				// Capture the session THIS dial built so a stale-generate
+				// close targets IT, not `this.session` (which could be a
+				// later `connect()`'s session by the time we resolve — the
+				// race that finding #2 of PR #5 used to leak the user's
+				// incoming peer B by closing it via `closeActiveSession`).
+				const mySession = await peerConnection.connect(peer.signalingHost, peer.signalingPort);
 				if (connectionGenerationRef.current !== myGeneration) {
-					// A user action landed during the handshake — take the late
-					// session straight back down without emitting a connected
-					// event the user did not ask for.
-					peerConnection.closeActiveSession();
+					peerConnection.closeStaleDialSession(mySession);
 				}
 			} catch {
 				if (connectionGenerationRef.current !== myGeneration) return;

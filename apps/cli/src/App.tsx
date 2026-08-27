@@ -38,8 +38,9 @@ import {
 } from "@wenchat/ui";
 import { Box, Text, useApp, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { appendCapped } from "./appendCapped";
 import { copyToClipboard } from "./clipboard";
-import { describePeer, phasePeer, toStatusBarStatus } from "./connectionMachine";
+import { phasePeer, toStatusBarStatus } from "./connectionMachine";
 import { useConnectionMachine } from "./connectionMachineBindings";
 import { isMouseModeEnabled, toggleMouseMode } from "./mouseMode";
 import { getCurrentVersion } from "./updater";
@@ -61,13 +62,6 @@ export type AppProps = {
 	 */
 	initialMessages?: readonly Message[];
 };
-
-/**
- * Upper bound on the retained chat log. Without a cap, `toDisplayLines` has to
- * re-wrap an ever-growing array on every resize and the process leaks memory
- * across a long-lived session.
- */
-const MAX_MESSAGES = 2000;
 
 export function App({ displayName, signalingPort, signalingHost, initialMessages = [] }: AppProps) {
 	const { exit } = useApp();
@@ -353,25 +347,23 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	};
 
 	const handleExit = () => {
-		// Emit the notice FIRST: the React tree is about to unmount, so the
-		// terminal event that would otherwise carry it may never render. This
-		// is why the machine deliberately stays silent on `local-exit`.
-		const peer = phasePeer(phaseRef.current);
-		const isRetrying = phaseRef.current.kind === "retrying";
-		if (peer) {
-			if (isRetrying) {
-				appendSystemMessage(`Reconnect cancelled. Disconnected from ${describePeer(peer)}`);
-			} else {
-				appendSystemMessage(`Disconnected from ${describePeer(peer)}`);
-			}
-		}
-		// Fire-and-forget the bye: the bounded wait in `closeGracefully` is
-		// irrelevant on this path because the process is about to die
-		// anyway, so the alt-screen release and `exit()` go through
-		// synchronously. `instance.waitUntilExit()` in main.tsx writes the
-		// alternate-screen exit sequence before the bye-drain completes; the
-		// peer's SCTP queue still flushes whatever it can.
-		void peerConnection.closeGracefully("local-exit").catch(() => {});
+		// Route through the machine rather than calling
+		// `peerConnection.closeGracefully` directly. Without this dispatch,
+		// the `invalidate-dials` / `cancel-retry` / `dispose-transfers`
+		// bookkeeping that `user-exit` owns never runs — a late `connect()`
+		// resolving AFTER React's unmount cleanup would pass runDial's
+		// stale-generation check (gen bumped only by the `invalidate-dials`
+		// effect that didn't fire) and install a session nobody would close.
+		//
+		// The disconnect notice still surfaces synchronously: the reducer's
+		// `system-message` effect runs inside `dispatch` (which is sync),
+		// so the message is in state before `exit()` returns.
+		dispatch({ kind: "user-exit" });
+		// Fire-and-forget mDNS shutdown — the bounded wait in
+		// `closeGracefully` is irrelevant on this path because the process
+		// is about to die, so the alt-screen release and `exit()` go through
+		// synchronously. `Discovery.stop` is idempotent so the mount-effect
+		// cleanup that fires during unmount is harmless.
 		discovery.stop().catch(() => {});
 		// Ink's `exit()` triggers App's componentWillUnmount → final onRender
 		// → cliCursor.show. After the React tree fully unmounts,
@@ -416,18 +408,27 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		setMouseEnabled(isMouseModeEnabled());
 	};
 
-	// Manually redial the last peer we talked to. Failures here do NOT
-	// trigger the auto-redial loop — user-initiated dials need predictable
-	// feedback, not a quiet retry storm, which is why this goes through the
-	// machine's `dial` event (whose `dial-failed` path lands in idle) rather
-	// than the retry path. `lastPeerRef` outlives every phase, so even after
-	// a peer left — or after the auto-redial gave up — this still has a target.
+	// Manually redial the last peer we talked to. Two phases are reachable:
+	//   - `idle`: a normal manual dial. Failures here do NOT trigger the
+	//     auto-redial loop — user-initiated dials need predictable feedback,
+	//     not a quiet retry storm, which is why this goes through the
+	//     machine's `dial` event (whose `dial-failed` path lands in idle)
+	//     rather than the retry path.
+	//   - `retrying`: the user wants to skip the wait. `lastPeerRef` outlives
+	//     every phase, so a stale retry's target is still here. Routing
+	//     through `retry-now` avoids the `dial` reducer's "Already connected.
+	//     Run /disconnect first" guard — a destructive wording for a command
+	//     whose intent is "do the retry now, same target".
 	const handleReconnect = () => {
 		const peer = lastPeerRef.current;
 		if (!peer) {
 			appendSystemMessage(
 				"No previous peer. Use /connect <host:port> or pick a peer from the list.",
 			);
+			return;
+		}
+		if (phaseRef.current.kind === "retrying") {
+			dispatch({ kind: "retry-now" });
 			return;
 		}
 		dispatch({ kind: "dial", peer });
@@ -729,15 +730,6 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			</Box>
 		</Box>
 	);
-}
-
-/**
- * Append a message, dropping the oldest once the log exceeds
- * {@link MAX_MESSAGES}. Returns a new array — the previous one is untouched.
- */
-function appendCapped(previous: readonly Message[], message: Message): Message[] {
-	const next = [...previous, message];
-	return next.length > MAX_MESSAGES ? next.slice(next.length - MAX_MESSAGES) : next;
 }
 
 /**
