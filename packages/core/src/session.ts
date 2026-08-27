@@ -1,5 +1,13 @@
 import type { FileChunkFramePayload, Message } from "@wenchat/protocol";
+import { createBye } from "@wenchat/protocol";
+import type { ByeReason } from "@wenchat/protocol";
 import { type RTCDataChannel, RTCIceCandidate, RTCPeerConnection } from "werift";
+import {
+	type CloseReason,
+	type ConnectionEvent,
+	normalizeConnectionState,
+	remoteReasonFor,
+} from "./connectionState";
 import {
 	type SendFileOptions,
 	type SendFileResult,
@@ -56,14 +64,19 @@ export class Session {
 	private remotePort?: number;
 	// Once a terminal WebRTC state has been observed (or our heartbeat
 	// fired), we suppress subsequent terminal emissions so listeners see
-	// at most one `disconnected`/`closed`/`failed` per session.
+	// at most one `closed` per session.
 	private terminated = false;
+	// Set by `close(reason)` or by an inbound `bye` BEFORE the pc teardown
+	// races back through `onconnectionstatechange`. Whoever gets to
+	// `notifyStateChange` first reads it; absent, a terminal state is by
+	// definition a transport failure and reads as "network".
+	private pendingCloseReason?: CloseReason;
 
 	private readonly signaling: SignalingServer;
 
 	private messageListeners: Set<(message: Message) => void> = new Set();
 	private chunkListeners: Set<(chunk: FileChunkFramePayload) => void> = new Set();
-	private stateListeners: Set<(state: string) => void> = new Set();
+	private stateListeners: Set<(event: ConnectionEvent) => void> = new Set();
 
 	// The SDP answer produced by `accept()`. Read once by
 	// `PeerConnection` after constructing the session, so the signaling
@@ -183,7 +196,7 @@ export class Session {
 		};
 	}
 
-	onStateChange(callback: (state: string) => void): () => void {
+	onStateChange(callback: (event: ConnectionEvent) => void): () => void {
 		this.stateListeners.add(callback);
 		return () => {
 			this.stateListeners.delete(callback);
@@ -191,11 +204,47 @@ export class Session {
 	}
 
 	/**
-	 * Tear this session down locally. The far end observes this as a
-	 * WebRTC `closed` event on its own pc; ICE timeouts reclaim the
-	 * pc once no Session references it.
+	 * Best-effort graceful-close signal. Tells the peer this teardown was
+	 * deliberate so it does not spend a reconnect-backoff window redialing
+	 * us. Never throws: if the channel is already gone there is nobody to
+	 * tell, and the peer falls back to the network-loss path.
 	 */
-	close(): void {
+	sendBye(reason: ByeReason): void {
+		if (!this.transport?.isOpen) return;
+		try {
+			this.transport.send(createBye(reason));
+		} catch (err) {
+			getLogger().warn({ err: errorText(err), reason }, "bye not sent");
+		}
+	}
+
+	/**
+	 * Number of bytes still queued on the data channel. Used by the
+	 * graceful-close path to know whether a just-sent `bye` has left.
+	 */
+	get bufferedAmount(): number {
+		return this.transport?.bufferedAmount ?? 0;
+	}
+
+	/**
+	 * Whether a `bye` would actually reach the wire right now. False while the
+	 * channel is still negotiating (or already gone) — the graceful-close path
+	 * waits on this so an early `/disconnect` doesn't silently drop the bye.
+	 */
+	get canSendBye(): boolean {
+		return this.transport?.isOpen === true;
+	}
+
+	/**
+	 * Tear this session down locally.
+	 *
+	 * `reason` records *why*, so the terminal event this triggers carries the
+	 * intent instead of looking like a network failure. It defaults to
+	 * `"network"` for callers that are cleaning up after a transport that has
+	 * already died.
+	 */
+	close(reason: CloseReason = "network"): void {
+		this.pendingCloseReason = reason;
 		this.stopHeartbeat();
 		this.transport?.close();
 		this.pc.close();
@@ -281,6 +330,12 @@ export class Session {
 				this.heartbeat?.handleIncoming(message);
 				return;
 			}
+			// A `bye` is control plane, not chat: it must never reach the
+			// message listeners or it would land in the chat log.
+			if (message.type === "bye") {
+				this.handleRemoteBye(message.payload.reason);
+				return;
+			}
 			for (const listener of this.messageListeners) {
 				try {
 					listener(message);
@@ -332,21 +387,32 @@ export class Session {
 		}
 	}
 
-	private notifyStateListeners(state: string): void {
+	private notifyStateListeners(event: ConnectionEvent): void {
 		for (const listener of this.stateListeners) {
 			try {
-				listener(state);
+				listener(event);
 			} catch (err) {
 				getLogger().error({ err: errorText(err) }, "state listener threw");
 			}
 		}
 	}
 
-	private notifyStateChange(state: string): void {
+	/**
+	 * Normalise a raw werift connection state into a `ConnectionEvent` and
+	 * fan it out. Terminal states are deduped by `terminated` so listeners
+	 * see exactly one `closed` per session, and the reason comes from
+	 * `pendingCloseReason` when a local intent (or an inbound `bye`) set it.
+	 */
+	private notifyStateChange(rawState: string): void {
+		const state = normalizeConnectionState(rawState);
+		if (state === null) {
+			// "new" — pre-handshake noise, carries nothing for the app.
+			return;
+		}
 		if (state === "connected") {
 			this.heartbeat?.start();
 		}
-		if (state === "disconnected" || state === "closed" || state === "failed") {
+		if (state === "closed") {
 			if (this.terminated) {
 				// Already terminated (e.g. heartbeat path closed the pc).
 				// Suppress the duplicate so listeners see one terminal
@@ -360,15 +426,42 @@ export class Session {
 			// without this a sender blocked in `waitForDrain` would hang
 			// forever on a channel whose readyState never changes.
 			this.transport?.close();
-			getLogger().info({ state }, "connection terminated");
-		} else {
-			getLogger().info({ state }, "connection state");
+			const reason = this.pendingCloseReason ?? "network";
+			getLogger().info({ rawState, reason }, "connection terminated");
+			this.notifyStateListeners({ state: "closed", reason });
+			return;
 		}
-		this.notifyStateListeners(state);
+		getLogger().info({ rawState }, "connection state");
+		this.notifyStateListeners({ state });
 	}
 
 	private stopHeartbeat(): void {
 		this.heartbeat?.stop();
+	}
+
+	/**
+	 * The peer told us it is leaving on purpose. Tear down immediately with
+	 * the remote reason rather than waiting for its `pc.close()` to
+	 * propagate: that path is asynchronous and unguaranteed, and in the gap
+	 * our own heartbeat watchdog could fire first and relabel the close as
+	 * `heartbeat-timeout` — which reads as retryable and puts us right back
+	 * in the redial loop this whole mechanism exists to avoid.
+	 */
+	private handleRemoteBye(reason: ByeReason): void {
+		if (this.terminated) return;
+		this.terminated = true;
+		this.stopHeartbeat();
+		const closeReason = remoteReasonFor(reason);
+		getLogger().info({ reason }, "peer said bye");
+		// Mirror `failByHeartbeat`: close the channel explicitly so an
+		// in-flight `sendFile` observes the death, then the pc.
+		this.transport?.close();
+		try {
+			this.pc.close();
+		} catch {
+			// pc.close() is idempotent — ignore double-close.
+		}
+		this.notifyStateListeners({ state: "closed", reason: closeReason });
 	}
 
 	private failByHeartbeat(): void {
@@ -385,6 +478,6 @@ export class Session {
 		} catch {
 			// pc.close() is idempotent — ignore double-close.
 		}
-		this.notifyStateListeners("disconnected");
+		this.notifyStateListeners({ state: "closed", reason: "heartbeat-timeout" });
 	}
 }

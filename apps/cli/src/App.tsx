@@ -3,6 +3,7 @@ import { access } from "node:fs/promises";
 import { basename } from "node:path";
 import {
 	type BindCandidate,
+	type ConnectionEvent,
 	DiscoveryService,
 	FileReceiver,
 	PeerConnection,
@@ -38,6 +39,16 @@ import {
 import { Box, Text, useApp, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { copyToClipboard } from "./clipboard";
+import {
+	type ConnectionPhase,
+	type Effect,
+	IDLE_PHASE,
+	type MachineEvent,
+	describePeer,
+	phasePeer,
+	reduce,
+	toStatusBarStatus,
+} from "./connectionMachine";
 import { isMouseModeEnabled, toggleMouseMode } from "./mouseMode";
 import { getCurrentVersion } from "./updater";
 
@@ -66,23 +77,18 @@ export type AppProps = {
  */
 const MAX_MESSAGES = 2000;
 
-// First slot is short ("Wi-Fi blip" — most transients recover inside
-// ~1 s); the trailing 10 s slots carry the "they're really gone"
-// stretch. Five attempts × ~28 s of wall-clock buys enough time to
-// ride out an access-point roam without stranding the user staring
-// at a spinner forever. The give-up message in `scheduleReconnect`
-// tells them what to try next.
-const RECONNECT_BACKOFF_MS = [1000, 2000, 5000, 10000, 10000] as const;
-const MAX_RECONNECT_ATTEMPTS = RECONNECT_BACKOFF_MS.length;
-
 export function App({ displayName, signalingPort, signalingHost, initialMessages = [] }: AppProps) {
 	const { exit } = useApp();
 	const [peers, setPeers] = useState<PeerInfo[]>([]);
 	const [messages, setMessages] = useState<Message[]>([...initialMessages]);
-	const [status, setStatus] = useState<"offline" | "connecting" | "reconnecting" | "online">(
-		"offline",
-	);
-	const [selectedPeer, setSelectedPeer] = useState<PeerInfo | null>(null);
+	// The single source of truth for "where is this connection at". Replaces
+	// the old `status` string plus the pile of reconnect refs — see
+	// `connectionMachine.ts` for why.
+	const [phase, setPhase] = useState<ConnectionPhase>(IDLE_PHASE);
+	const selectedPeer = phasePeer(phase);
+	// The four-value union `StatusBar`/`Header` render from. Derived, so the
+	// bar can never disagree with the machine about what state we're in.
+	const status = toStatusBarStatus(phase);
 	const [inputText, setInputText] = useState("");
 	// `main.tsx` may have already entered mouse mode (TTY, no `--no-mouse`);
 	// seed React state from the actual terminal state so the first render
@@ -113,32 +119,22 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	const connectionGenerationRef = useRef(0);
 
 	// Snapshot of the last peer we initiated a session with (PeerList
-	// click or `/connect`). Survives the React state reset we do on
-	// terminal states, so `/reconnect` can redial without the user
-	// having to remember host:port. Only written for OUTBOUND calls —
-	// an incoming offer is not "the peer we wanted to talk to".
+	// click or `/connect`). Deliberately OUTSIDE the state machine: it
+	// outlives every phase — including the idle gap after a peer left — so
+	// `/reconnect` can redial without the user having to remember host:port.
+	// Only written for OUTBOUND calls; an incoming offer is not "the peer we
+	// wanted to talk to".
 	const lastPeerRef = useRef<PeerInfo | null>(null);
 
-	// 1-based. Reset to 0 on `connected` or on any user cancel. Read by
-	// `formatReconnectNotice` to render "(attempt 2/5)" and by the
-	// backoff scheduler to pick the next slot.
-	const reconnectAttemptRef = useRef(0);
-
-	// `setTimeout` handle for the pending reconnect. `null` means no
-	// reconnect is queued. Cleared by `cancelReconnectTimer`, by user
-	// actions that change targets (`/disconnect`, `/cancel`, picking a
-	// different peer), and by the useEffect cleanup on unmount.
+	// `setTimeout` handle for the pending reconnect. Written only by the
+	// effect executor (`schedule-retry` / `cancel-retry`) and by the
+	// useEffect cleanup on unmount — never by a command handler.
 	const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-	// Mirror `selectedPeer` into a ref so that the long-lived `onStateChange`
-	// closure — which is registered once on mount — always sees the latest
-	// peer info when emitting "Connected to …" / "Lost connection to …"
-	// system messages. Without this, the closure would capture whichever peer
-	// was selected at mount time (typically null) and never observe clicks.
-	const selectedPeerRef = useRef<PeerInfo | null>(null);
-	useEffect(() => {
-		selectedPeerRef.current = selectedPeer;
-	}, [selectedPeer]);
+	// Mirror `phase` into a ref so the long-lived listener closures —
+	// registered once on mount — reduce against the CURRENT phase instead of
+	// the one captured at mount time (always idle).
+	const phaseRef = useRef<ConnectionPhase>(IDLE_PHASE);
 
 	// Same mirror for the discovery list: the long-lived `onIncoming`
 	// closure (registered once on mount) needs the latest `peers` to look
@@ -181,31 +177,18 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		const unsubscribePeers = discovery.onPeersUpdated(setPeers);
 
 		const unsubscribeIncoming = peerConnection.onIncoming(({ signalingHost, signalingPort }) => {
-			// Receiver side: someone is dialing us. Resolve the
-			// signaling endpoint to a PeerInfo (either a discovered
-			// peer or a synthetic fallback), seed both the ref and
-			// the React state so the upcoming `onStateChange("connected")`
-			// branch sees a peer, and flip status to "connecting" for
-			// parity with the initiator's path. Writing
-			// `selectedPeerRef.current` synchronously here closes the
-			// race with werift's async `onconnectionstatechange`.
-			// TODO: multi-session handoff — if a session is already
-			// active when a new offer arrives, the outgoing session's
-			// terminal event will fire under the new peer's identity.
+			// Receiver side: someone is dialing us. Resolve the signaling
+			// endpoint to a PeerInfo (a discovered peer, or a synthetic
+			// fallback) and hand it to the machine, which moves us into
+			// `dialing` so the upcoming `connected` event has an identity to
+			// name — and cancels any retry we had queued, since their offer
+			// beat us to it.
 			//
-			// An inbound offer while we're auto-redialing means the
-			// remote beat us to the punch (or our cached host:port is
-			// stale). Cancel the retry so the two handshakes don't race;
-			// their offer completes on the next microtask.
-			if (reconnectTimerRef.current !== null) {
-				cancelReconnectTimer();
-				reconnectAttemptRef.current = 0;
-				connectionGenerationRef.current++;
-			}
+			// TODO: multi-session handoff — if a session is already active
+			// when a new offer arrives, the outgoing session's terminal event
+			// will fire under the new peer's identity.
 			const peer = resolveIncomingPeer(peersRef.current, signalingHost, signalingPort);
-			selectedPeerRef.current = peer;
-			setSelectedPeer(peer);
-			setStatus("connecting");
+			dispatch({ kind: "incoming", peer });
 		});
 		const unsubscribeMessage = peerConnection.onMessage((message) => {
 			if (message.type === "text") {
@@ -223,48 +206,12 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		const unsubscribeChunks = peerConnection.onFileChunk((chunk) => {
 			fileReceiver.handleChunk(chunk);
 		});
-		const unsubscribeState = peerConnection.onStateChange((state) => {
-			const peer = selectedPeerRef.current;
-			if (state === "connected") {
-				setStatus("online");
-				reconnectAttemptRef.current = 0;
-				cancelReconnectTimer();
-				if (peer) {
-					const endpoint = `${peer.signalingHost}:${peer.signalingPort}`;
-					const text =
-						peer.id === "manual"
-							? `Connected to ${endpoint}`
-							: `Connected to ${peer.displayName} (${endpoint})`;
-					appendSystemMessage(text);
-				}
-			} else if (state === "connecting") {
-				setStatus("connecting");
-			} else {
-				// Terminal state (disconnected/closed/failed). PeerConnection
-				// guards with a `terminated` flag so we only see one of these
-				// per connection attempt, so it's safe to emit a system
-				// message every time.
-				//
-				// PeerConnection detaches its forwarders before `/disconnect`
-				// closes the session, so we NEVER see a terminal here for a
-				// manual teardown — every entry is network-driven. File the
-				// peer for auto-redial and keep `selectedPeer` set so the
-				// StatusBar can still name the target during the retry
-				// window. `lastPeerRef` survives even if the user later
-				// nulls out `selectedPeer` via the give-up path, so
-				// `/reconnect` can still redial.
-				if (peer) {
-					lastPeerRef.current = peer;
-					reconnectAttemptRef.current = 1;
-					setStatus("reconnecting");
-					scheduleReconnect(peer);
-				} else {
-					setStatus("offline");
-				}
-				// Any in-flight incoming transfer is now hopeless — clean up
-				// its temp file and emit a "failed" system entry per transfer.
-				void fileReceiver.dispose();
-			}
+		const unsubscribeState = peerConnection.onStateChange((event: ConnectionEvent) => {
+			// Remember who we were talking to before the machine drops back to
+			// idle, so `/reconnect` still has a target after the peer left.
+			const peer = phasePeer(phaseRef.current);
+			if (peer) lastPeerRef.current = peer;
+			dispatch({ kind: "wire", event });
 		});
 
 		// Sequence the two starts so the mDNS publish carries the *real*
@@ -309,33 +256,13 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		};
 	}, [discovery, displayName, peerConnection, signalingPort, bindHost]);
 
-	const handleSelectPeer = async (peer: PeerInfo) => {
-		// Re-selecting a peer (or any other peer) while already connected
-		// would have flipped the status to "connecting" and torn down the
-		// live session inside `peerConnection.connect()`. Reject the click
-		// and ask the user to /disconnect first so the active chat isn't
-		// silently dropped on them. "reconnecting" is treated the same as
-		// the active states — picking a new target cancels the auto-retry.
-		if (status === "online" || status === "connecting" || status === "reconnecting") {
-			appendSystemMessage("Already connected. Run /disconnect first to switch peer.");
-			return;
-		}
-		cancelReconnectTimer();
-		reconnectAttemptRef.current = 0;
-		setSelectedPeer(peer);
+	// Every dial entry point — PeerList click, `/connect`, `/reconnect` —
+	// funnels through the machine's `dial` event, which owns the
+	// "already connected, /disconnect first" guard and the cancel +
+	// invalidate bookkeeping that used to be copy-pasted per handler.
+	const handleSelectPeer = (peer: PeerInfo) => {
 		lastPeerRef.current = peer;
-		setStatus("connecting");
-		const myGeneration = ++connectionGenerationRef.current;
-		try {
-			await peerConnection.connect(peer.signalingHost, peer.signalingPort);
-			if (connectionGenerationRef.current !== myGeneration) return;
-		} catch {
-			if (connectionGenerationRef.current !== myGeneration) return;
-			setStatus("offline");
-			appendSystemMessage(
-				`Failed to connect to ${peer.displayName} (${peer.signalingHost}:${peer.signalingPort})`,
-			);
-		}
+		dispatch({ kind: "dial", peer });
 	};
 
 	const handleSend = (text: string) => {
@@ -397,71 +324,40 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	};
 
 	const handleDisconnect = () => {
-		cancelReconnectTimer();
-		reconnectAttemptRef.current = 0;
-		// Bump the generation BEFORE the synchronous state reset so any
-		// in-flight `connect()` await sees a stale token and bails out
-		// without re-installing its session under us — including a
-		// /reconnect attempt that was about to fire its timer.
-		connectionGenerationRef.current++;
-		const peer = selectedPeerRef.current;
-		if (!peer) {
-			appendSystemMessage("Not connected");
-			return;
-		}
-		// Tear down the active session but leave the signaling server up so
-		// the user can dial out (or accept an offer) again. The remote peer
-		// observes the close on its pc and its own listener emits
-		// "Lost connection to …" — this side emits the matching
-		// "Disconnected from …" so both sides see a notice.
-		peerConnection.disconnect();
-		setStatus("offline");
-		setSelectedPeer(null);
-		const endpoint = `${peer.signalingHost}:${peer.signalingPort}`;
-		const text =
-			peer.id === "manual"
-				? `Disconnected from ${endpoint}`
-				: `Disconnected from ${peer.displayName} (${endpoint})`;
-		appendSystemMessage(text);
+		// The machine sends a `bye` and lets the resulting terminal event —
+		// now carrying `local-disconnect` — drive both the transition and the
+		// "Disconnected from …" notice. Emitting the notice here as well is
+		// exactly how this used to print twice once local closes became
+		// visible to listeners.
+		dispatch({ kind: "user-disconnect" });
 	};
 
 	const handleExit = () => {
-		cancelReconnectTimer();
-		reconnectAttemptRef.current = 0;
-		// Emit the disconnect notice FIRST so the local chat log records the
-		// close, mirroring what the remote peer will see via its own
-		// onStateChange("closed") handler. The teardown that follows
-		// (peerConnection.close + exit) detaches the listeners so this
-		// doesn't race with the "Lost connection to …" path on the way out.
-		const peer = selectedPeerRef.current;
+		// Emit the notice FIRST: the React tree is about to unmount, so the
+		// terminal event that would otherwise carry it may never render. This
+		// is why the machine deliberately stays silent on `local-exit`.
+		const peer = phasePeer(phaseRef.current);
 		if (peer) {
-			const endpoint = `${peer.signalingHost}:${peer.signalingPort}`;
-			const text =
-				peer.id === "manual"
-					? `Disconnected from ${endpoint}`
-					: `Disconnected from ${peer.displayName} (${endpoint})`;
-			appendSystemMessage(text);
+			appendSystemMessage(`Disconnected from ${describePeer(peer)}`);
 		}
-		peerConnection.close();
-		discovery.stop().catch(() => {});
-		// Ink's `exit()` triggers App's componentWillUnmount → final onRender
-		// → cliCursor.show. After the React tree fully unmounts,
-		// `instance.waitUntilExit()` in main.tsx resolves and writes the
-		// alternate-screen exit sequence before terminating the process.
-		// We intentionally do NOT call `process.exit()` here — leaving the
-		// shutdown sequencing to main.tsx keeps the alternate buffer release
-		// and the process exit in the same microtask, so the host terminal
-		// never sees a half-rendered final frame.
-		exit();
+		// Send the bye and give it a bounded window to leave the wire before
+		// the pc goes down — otherwise the peer sees an abrupt close and
+		// spends a full backoff window redialing someone who just quit.
+		void peerConnection.closeGracefully("local-exit").finally(() => {
+			discovery.stop().catch(() => {});
+			// Ink's `exit()` triggers App's componentWillUnmount → final onRender
+			// → cliCursor.show. After the React tree fully unmounts,
+			// `instance.waitUntilExit()` in main.tsx resolves and writes the
+			// alternate-screen exit sequence before terminating the process.
+			// We intentionally do NOT call `process.exit()` here — leaving the
+			// shutdown sequencing to main.tsx keeps the alternate buffer release
+			// and the process exit in the same microtask, so the host terminal
+			// never sees a half-rendered final frame.
+			exit();
+		});
 	};
 
-	const handleConnect = async (hostPort: string) => {
-		if (status === "online" || status === "connecting" || status === "reconnecting") {
-			appendSystemMessage("Already connected. Run /disconnect first to switch peer.");
-			return;
-		}
-		cancelReconnectTimer();
-		reconnectAttemptRef.current = 0;
+	const handleConnect = (hostPort: string) => {
 		const lastColon = hostPort.lastIndexOf(":");
 		if (lastColon <= 0 || lastColon === hostPort.length - 1) {
 			appendSystemMessage(`Invalid /connect argument: expected <host:port>, got "${hostPort}"`);
@@ -479,18 +375,8 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			signalingHost: host,
 			signalingPort: port,
 		};
-		setSelectedPeer(manualPeer);
 		lastPeerRef.current = manualPeer;
-		setStatus("connecting");
-		const myGeneration = ++connectionGenerationRef.current;
-		try {
-			await peerConnection.connect(host, port);
-			if (connectionGenerationRef.current !== myGeneration) return;
-		} catch {
-			if (connectionGenerationRef.current !== myGeneration) return;
-			setStatus("offline");
-			appendSystemMessage(`Failed to connect to ${hostPort}`);
-		}
+		dispatch({ kind: "dial", peer: manualPeer });
 	};
 
 	const handleMouse = () => {
@@ -505,10 +391,11 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 
 	// Manually redial the last peer we talked to. Failures here do NOT
 	// trigger the auto-redial loop — user-initiated dials need predictable
-	// feedback, not a quiet retry storm. `lastPeerRef` is intentionally
-	// preserved across the offline gap by `onStateChange`, so even if the
-	// auto-redial already gave up the user can still call this.
-	const handleReconnect = async () => {
+	// feedback, not a quiet retry storm, which is why this goes through the
+	// machine's `dial` event (whose `dial-failed` path lands in idle) rather
+	// than the retry path. `lastPeerRef` outlives every phase, so even after
+	// a peer left — or after the auto-redial gave up — this still has a target.
+	const handleReconnect = () => {
 		const peer = lastPeerRef.current;
 		if (!peer) {
 			appendSystemMessage(
@@ -516,39 +403,14 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			);
 			return;
 		}
-		if (status === "online" || status === "connecting" || status === "reconnecting") {
-			appendSystemMessage("Already connected. Run /disconnect first to switch peer.");
-			return;
-		}
-		cancelReconnectTimer();
-		reconnectAttemptRef.current = 0;
-		setSelectedPeer(peer);
-		setStatus("connecting");
-		const myGeneration = ++connectionGenerationRef.current;
-		try {
-			await peerConnection.connect(peer.signalingHost, peer.signalingPort);
-			if (connectionGenerationRef.current !== myGeneration) return;
-		} catch {
-			if (connectionGenerationRef.current !== myGeneration) return;
-			setStatus("offline");
-			const label =
-				peer.id === "manual" ? `${peer.signalingHost}:${peer.signalingPort}` : peer.displayName;
-			appendSystemMessage(`Failed to reconnect to ${label}`);
-		}
+		dispatch({ kind: "dial", peer });
 	};
 
 	// Abort a pending auto-reconnect. Keeps `lastPeerRef` so the user can
 	// retry with `/reconnect` later — we only stop the timer, we don't
 	// forget the target.
 	const handleCancel = () => {
-		if (reconnectTimerRef.current === null) {
-			appendSystemMessage("No reconnect in progress.");
-			return;
-		}
-		cancelReconnectTimer();
-		reconnectAttemptRef.current = 0;
-		setStatus("offline");
-		appendSystemMessage("Reconnect cancelled.");
+		dispatch({ kind: "user-cancel" });
 	};
 
 	const handleCommand = (name: string, arg: string) => {
@@ -727,11 +589,11 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 			}),
 	);
 
-	// Reconnect scheduler — declared ahead of the main `useEffect` so the
+	// State-machine plumbing — declared ahead of the main `useEffect` so the
 	// `onStateChange` and `onIncoming` closures registered there can call
-	// into them without an "is not defined" TDZ trip. `appendSystemMessage`
-	// is pulled up from below so these can reference it; that helper only
-	// needs `setMessages`, which is already in scope.
+	// `dispatch` without an "is not defined" TDZ trip. (They reference it
+	// from inside the callback body only; it is deliberately NOT in that
+	// effect's dependency array, which is what keeps the TDZ closed.)
 	const appendSystemMessage = useCallback((text: string) => {
 		const message: TextMessage = {
 			type: "text",
@@ -749,55 +611,90 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		}
 	}, []);
 
-	const scheduleReconnect = useCallback(
-		(peer: PeerInfo) => {
-			if (reconnectAttemptRef.current > MAX_RECONNECT_ATTEMPTS) {
-				setStatus("offline");
-				appendSystemMessage(
-					`Reconnect failed after ${MAX_RECONNECT_ATTEMPTS} attempts. Try /reconnect or pick another peer.`,
-				);
-				return;
-			}
-			const attempt = reconnectAttemptRef.current;
-			const slot = RECONNECT_BACKOFF_MS[attempt - 1] ?? RECONNECT_BACKOFF_MS.at(-1) ?? 10000;
-			const seconds = Math.round(slot / 1000);
-			const label =
-				peer.id === "manual" ? `${peer.signalingHost}:${peer.signalingPort}` : peer.displayName;
-			appendSystemMessage(
-				attempt === 1
-					? `Lost connection to ${label}. Reconnecting in ${seconds}s…`
-					: `Reconnect attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS} in ${seconds}s…`,
-			);
-			reconnectTimerRef.current = setTimeout(() => {
-				reconnectTimerRef.current = null;
-				void attemptReconnect(peer);
-			}, slot);
-		},
-		[appendSystemMessage],
-	);
-
-	const attemptReconnect = useCallback(
+	/**
+	 * Dial a peer, reporting failure back into the machine.
+	 *
+	 * The generation token guards the async gap: if a later user action (or a
+	 * `/disconnect`) supersedes this dial while the handshake is in flight, a
+	 * late resolve must not re-install its session or surface a stale error.
+	 * That concern is orthogonal to the phase, which is why the counter stays
+	 * out here rather than inside the reducer.
+	 */
+	const runDial = useCallback(
 		async (peer: PeerInfo) => {
-			// Release the dead session's UDP/STUN resources so the new pc's
-			// ICE gather doesn't stall against the closed pc's leftovers.
-			// Safe to call when no session is active.
-			peerConnection.closeActiveSession();
-
 			const myGeneration = connectionGenerationRef.current;
 			try {
 				await peerConnection.connect(peer.signalingHost, peer.signalingPort);
-				// Success path: `onStateChange("connected")` flips status to
-				// "online" and resets the attempt counter. We only run the
-				// stale-generation guard here — no other state to write.
-				void myGeneration;
 			} catch {
 				if (connectionGenerationRef.current !== myGeneration) return;
-				reconnectAttemptRef.current += 1;
-				scheduleReconnect(peer);
+				dispatchRef.current({ kind: "dial-failed" });
 			}
 		},
-		[peerConnection, scheduleReconnect],
+		[peerConnection],
 	);
+
+	/** The one place a machine effect turns into a real side effect. */
+	const runEffect = useCallback(
+		(effect: Effect) => {
+			switch (effect.kind) {
+				case "cancel-retry":
+					cancelReconnectTimer();
+					return;
+				case "schedule-retry":
+					cancelReconnectTimer();
+					reconnectTimerRef.current = setTimeout(() => {
+						reconnectTimerRef.current = null;
+						dispatchRef.current({ kind: "retry-fired" });
+					}, effect.delayMs);
+					return;
+				case "dial":
+					void runDial(effect.peer);
+					return;
+				case "close-active-session":
+					// Release the dead session's UDP/STUN resources so the new
+					// pc's ICE gather doesn't stall against the closed pc's
+					// leftovers. Safe when no session is active.
+					peerConnection.closeActiveSession();
+					return;
+				case "close-graceful":
+					void peerConnection.closeGracefully(effect.reason);
+					return;
+				case "invalidate-dials":
+					connectionGenerationRef.current++;
+					return;
+				case "dispose-transfers":
+					// Any in-flight incoming transfer is now hopeless — clean up
+					// its temp file and emit a "failed" system entry per transfer.
+					void fileReceiver.dispose();
+					return;
+				case "system-message":
+					appendSystemMessage(effect.text);
+					return;
+			}
+		},
+		[appendSystemMessage, cancelReconnectTimer, fileReceiver, peerConnection, runDial],
+	);
+
+	const dispatch = useCallback(
+		(event: MachineEvent) => {
+			// Reduce against the ref, not the rendered `phase`: several events
+			// can land inside one tick (a terminal event immediately followed by
+			// its retry), and the rendered value would still be the pre-tick one.
+			const { phase: next, effects } = reduce(phaseRef.current, event);
+			phaseRef.current = next;
+			setPhase(next);
+			for (const effect of effects) {
+				runEffect(effect);
+			}
+		},
+		[runEffect],
+	);
+
+	// `runDial` and the retry timer need to dispatch, but they are defined
+	// above `dispatch`. Route them through a ref so there is no circular
+	// `useCallback` dependency (and no stale closure either).
+	const dispatchRef = useRef(dispatch);
+	dispatchRef.current = dispatch;
 
 	const copyAndReport = useCallback(
 		(text: string) => {

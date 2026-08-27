@@ -23,7 +23,7 @@ afterEach(() => {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-const TERMINAL_STATES = new Set(["disconnected", "closed", "failed"]);
+const TERMINAL_STATES = new Set(["closed"]);
 
 async function waitForCondition(
 	states: string[],
@@ -167,7 +167,7 @@ describe("core integration: file transfer", () => {
 		// previously a channel-only failure left both peers phantom-online
 		// because nothing wired the channel's close into session state.
 		const bobStates: string[] = [];
-		bob.onStateChange((state) => bobStates.push(state));
+		bob.onStateChange((e) => bobStates.push(e.state));
 
 		await alice.connect("127.0.0.1", bob.getSignalingPort());
 		const reachedConnected = await waitForCondition(bobStates, (s) => s === "connected", 5000);
@@ -186,7 +186,7 @@ describe("core integration: file transfer", () => {
 		await alice2.startListening(0);
 		try {
 			const bobStates2: string[] = [];
-			bob.onStateChange((state) => bobStates2.push(state));
+			bob.onStateChange((e) => bobStates2.push(e.state));
 			await alice2.connect("127.0.0.1", bob.getSignalingPort());
 			const reconnected = await waitForCondition(bobStates2, (s) => s === "connected", 10000);
 			expect(reconnected).toBe(true);

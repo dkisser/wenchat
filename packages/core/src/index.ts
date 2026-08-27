@@ -1,3 +1,4 @@
+export * from "./connectionState";
 export * from "./discovery";
 export * from "./fileTransfer";
 export * from "./logger";
