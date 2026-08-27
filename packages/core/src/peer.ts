@@ -276,7 +276,12 @@ export class PeerConnection {
 		}
 		this.closeSession(reason);
 		if (stopSignaling) {
-			await this.signaling.stop().catch(() => {});
+			// Deliberately NOT awaited: `server.close()` only invokes its
+			// callback once every open connection has gone away, and a peer
+			// holding a keep-alive socket can stall that indefinitely. The
+			// `/exit` path awaits this method before Ink's `exit()`, so an
+			// await here would hang the whole shutdown behind a remote socket.
+			this.signaling.stop().catch(() => {});
 		}
 	}
 
