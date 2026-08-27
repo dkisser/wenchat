@@ -5,7 +5,15 @@ import type { Message } from "./message";
  * — they use the binary framing in `frame.ts` — so no Uint8Array payload
  * survives to JSON.stringify and no special-casing is needed on decode.
  */
-const MESSAGE_TYPES = new Set(["text", "file-start", "file-end", "file-abort", "ping", "pong"]);
+const MESSAGE_TYPES = new Set([
+	"text",
+	"file-start",
+	"file-end",
+	"file-abort",
+	"ping",
+	"pong",
+	"bye",
+]);
 
 export function encode(message: Message): Uint8Array {
 	return new TextEncoder().encode(JSON.stringify(message));

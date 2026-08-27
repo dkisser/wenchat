@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { decode, encode } from "../src/codec";
 import { createFileAbort, createFileEnd, createFileStart } from "../src/file";
 import type { PingMessage, PongMessage, TextMessage } from "../src/message";
+import { createBye } from "../src/message";
 
 describe("codec", () => {
 	it("encodes and decodes a text message", () => {
@@ -49,6 +50,14 @@ describe("codec", () => {
 
 		const abort = createFileAbort("tid", "boom");
 		expect(decode(encode(abort))).toEqual(abort);
+	});
+
+	it("round-trips a bye message for both reasons", () => {
+		const exit = createBye("exit", "b1");
+		expect(decode(encode(exit))).toEqual(exit);
+
+		const disconnect = createBye("disconnect", "b2");
+		expect(decode(encode(disconnect))).toEqual(disconnect);
 	});
 
 	it("rejects a JSON file-chunk — chunks travel as binary frames", () => {

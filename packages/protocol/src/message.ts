@@ -56,13 +56,44 @@ export type PongMessage = {
 	payload: { nonce: string };
 };
 
+/**
+ * Why a peer is tearing the session down.
+ *
+ * `exit` — the peer is quitting the process entirely.
+ * `disconnect` — the peer stays in the app, it just dropped this session.
+ *
+ * The distinction is purely cosmetic to the receiver (both mean "do not
+ * auto-retry"), but it lets the UI say "left the chat" vs "disconnected".
+ */
+export type ByeReason = "exit" | "disconnect";
+
+/**
+ * Graceful-close signal, sent right before a local teardown.
+ *
+ * WebRTC carries no *intent*: a peer calling `pc.close()` and a peer whose
+ * Wi-Fi died produce the identical `closed` event on the other end. Without
+ * this message the receiver has to assume every close is a network blip and
+ * burns a full reconnect-backoff window on a peer that deliberately left.
+ *
+ * Best-effort by design — a peer running an older protocol drops the unknown
+ * type (see `DataTransport`'s decode guard) and simply falls back to the
+ * network-loss path.
+ */
+export type ByeMessage = {
+	type: "bye";
+	id: string;
+	timestamp: number;
+	payload: { reason: ByeReason };
+};
+
 export type Message =
 	| TextMessage
 	| FileStartMessage
 	| FileEndMessage
 	| FileAbortMessage
 	| PingMessage
-	| PongMessage;
+	| PongMessage
+	| ByeMessage;
 
 export type PeerInfo = {
 	id: string;
@@ -86,5 +117,14 @@ export function createPong(nonce: string, id: string = crypto.randomUUID()): Pon
 		id,
 		timestamp: Date.now(),
 		payload: { nonce },
+	};
+}
+
+export function createBye(reason: ByeReason, id: string = crypto.randomUUID()): ByeMessage {
+	return {
+		type: "bye",
+		id,
+		timestamp: Date.now(),
+		payload: { reason },
 	};
 }
