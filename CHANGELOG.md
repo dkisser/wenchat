@@ -7,6 +7,40 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-08-27
+
+### Fixed
+
+- **Reconnect after a network drop no longer strands the user.** When the
+  underlying WebRTC `RTCPeerConnection` closes because the remote end died,
+  Wi-Fi roamed, or ICE gave up, werift's transport (the `DataChannel`) and
+  the session heartbeat were still holding the UDP/STUN resources open. A
+  fresh `connect()` would create a new `RTCPeerConnection`, but those
+  leftovers prevented the new ICE gather from ever leaving `checking` —
+  visible to the user as "the chat never reconnects unless both sides are
+  restarted". `PeerConnection.closeActiveSession()` now closes the dead pc
+  + transport + heartbeat and clears the session reference, so the next
+  handshake starts on a clean slate.
+
+### Added
+
+- **Automatic reconnect with exponential-ish backoff.** Network-driven
+  disconnects now trigger up to five redial attempts at `1s, 2s, 5s, 10s,
+  10s` (~28 s total wall-clock, enough to ride an access-point roam). The
+  StatusBar shows `Reconnecting to <name>…` in yellow while the timer is
+  armed, and the chat log records each attempt. After the fifth attempt the
+  state drops back to `offline` with a hint pointing the user at
+  `/reconnect` or another peer.
+
+- **`/reconnect` magic command.** Redials the last peer the user initiated a
+  session with — survives the terminal-state React reset that wipes
+  `selectedPeer`, because the snapshot lives in `lastPeerRef`. Failures are
+  surfaced as a single offline message; the command deliberately does NOT
+  loop, because user-initiated dials need predictable feedback.
+
+- **`/cancel` magic command.** Aborts a pending auto-reconnect. Preserves
+  `lastPeerRef` so a follow-up `/reconnect` still knows the target.
+
 ## [0.1.7] - 2026-08-18
 
 ### Changed
