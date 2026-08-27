@@ -1,5 +1,5 @@
 import type { FileChunkFramePayload, Message } from "@wenchat/protocol";
-import type { ConnectionEvent } from "./connectionState";
+import type { CloseReason, ConnectionEvent } from "./connectionState";
 import type { SendFileOptions, SendFileResult } from "./fileTransfer";
 import { getLogger } from "./logger";
 import { Session } from "./session";
@@ -77,6 +77,22 @@ export class PeerConnection {
 	private chunkListeners: Set<(chunk: FileChunkFramePayload) => void> = new Set();
 	private stateListeners: Set<(event: ConnectionEvent) => void> = new Set();
 	private incomingListeners: Set<(info: IncomingOfferInfo) => void> = new Set();
+
+	/**
+	 * Most recent teardown intent set by {@link closeGracefully},
+	 * {@link close}, or {@link disconnect}. A late `connect()` that
+	 * resolves stale (see {@link closeStaleDialSession}) reads this so
+	 * the resulting close carries the user's reason — without it, the
+	 * default `"network"` would have the state machine retry a peer the
+	 * user already /disconnected from, surfacing as a duplicate
+	 * "Failed to connect to X" alongside the disconnect notice.
+	 *
+	 * Set before any close-path can yield, so the value is observable to
+	 * `closeStaleDialSession` even when the close is racing an in-flight
+	 * `connect()` (the user typed /disconnect mid-dial). Held across
+	 * later closes — successive calls overwrite with the latest intent.
+	 */
+	private closeIntent: CloseReason | null = null;
 
 	// The host:port we tell the remote peer to use when signaling back
 	// to us. Defaults to loopback but LAN-mode callers override it.
@@ -234,6 +250,7 @@ export class PeerConnection {
 	 * nobody is left to inform.
 	 */
 	close(): void {
+		this.closeIntent = "local-exit";
 		this.closeSession("local-exit");
 		this.signaling.stop().catch(() => {});
 	}
@@ -253,6 +270,7 @@ export class PeerConnection {
 	 * Wi-Fi drop — so the reason now travels with the event instead.
 	 */
 	disconnect(): void {
+		this.closeIntent = "local-disconnect";
 		this.closeSession("local-disconnect");
 	}
 
@@ -268,6 +286,10 @@ export class PeerConnection {
 		reason: "local-exit" | "local-disconnect",
 		stopSignaling = reason === "local-exit",
 	): Promise<void> {
+		// Set the intent BEFORE any await so a `connect()` that resolves
+		// stale during the bufferedAmount wait reads the right reason out of
+		// `closeStaleDialSession`. See `closeIntent`'s note.
+		this.closeIntent = reason;
 		const session = this.session;
 		if (session) {
 			// A channel that is still "connecting" (SCTP association coming up
@@ -356,14 +378,21 @@ export class PeerConnection {
 	 * session.
 	 */
 	closeStaleDialSession(session: Session): void {
+		// Honor any teardown intent observed since the stale dial started.
+		// Without this, a `/disconnect` or `/exit` issued during a connect
+		// would race: this method would close the new session with
+		// `reason = "network"` (the default), and the state machine would
+		// interpret that as retryable — "Failed to connect to X" right
+		// alongside the user's actual disconnect notice.
+		const reason = this.closeIntent ?? "network";
 		if (this.session === session) {
-			session.close();
+			session.close(reason);
 			this.session = undefined;
 			return;
 		}
 		// Already detached by `swapSession` (or never installed here). The
 		// session's `terminated` flag suppresses a second close event.
-		session.close();
+		session.close(reason);
 	}
 
 	/**
