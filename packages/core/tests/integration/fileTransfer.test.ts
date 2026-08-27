@@ -96,7 +96,11 @@ describe("core integration: file transfer", () => {
 		expect(result.bytesSent).toBe(content.length);
 		expect(result.checksum).toBe(sha256Hex(content));
 
-		const completed = await waitForMatch(bobEvents, (e) => e.kind === "completed", 15000);
+		// 8 MiB over werift's pure-JS SCTP takes ~3s locally but can run to
+		// ~16s on Linux CI runners; the previous 15s waitForMatch budget was
+		// right at the edge and flaked the test. The outer it() budget is
+		// still 30s, so 25s leaves headroom for a real stall.
+		const completed = await waitForMatch(bobEvents, (e) => e.kind === "completed", 25000);
 		expect(completed).toBe(true);
 
 		const event = bobEvents.find((e) => e.kind === "completed");
