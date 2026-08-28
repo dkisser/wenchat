@@ -305,8 +305,14 @@ export class PeerConnection {
 			if (this.session !== session) return;
 			session.sendBye(reason === "local-exit" ? "exit" : "disconnect");
 			// `sendBye` only queues bytes; `pc.close()` right after would
-			// discard them.
-			await this.waitUntil(() => session.bufferedAmount === 0, BYE_FLUSH_TIMEOUT_MS);
+			// discard them. Use werift's SCTP `outboundQueue.length` as the
+			// real flush signal — `transport.bufferedAmount` drops to 0 the
+			// instant `sctp.send()` resolves, which on a session with T3-rtx
+			// armed (any unACKed traffic in the last RTO) happens BEFORE
+			// `transmit()` ever runs. Waiting on `bufferedAmount` let the
+			// pc.close()-after-BYErace slip through and surface on the peer
+			// as a `network` close, re-triggering auto-retry.
+			await this.waitUntil(() => session.hasFlushedOutbound, BYE_FLUSH_TIMEOUT_MS);
 			if (this.session !== session) return;
 		}
 		this.closeSession(reason);
