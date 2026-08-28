@@ -63,10 +63,15 @@ describe("connectionMachine — the retry gate", () => {
 	}
 
 	for (const reason of RETRYABLE) {
-		it(`schedules a retry for "${reason}"`, () => {
+		it(`probes the peer's process before any retry for "${reason}"`, () => {
+			// A transport-level close no longer redials blind: the machine
+			// first asks the peer's signaling port whether the PROCESS is
+			// still alive (`probe-peer`), and only the probe's outcome
+			// decides between retrying and giving up.
 			const { phase: next, effects } = reduce(ONLINE, closed(reason));
-			expect(kinds(effects)).toContain("schedule-retry");
-			expect(next).toEqual({ kind: "retrying", peer: alice, attempt: 1 });
+			expect(kinds(effects)).not.toContain("schedule-retry");
+			expect(effects).toContainEqual({ kind: "probe-peer", peer: alice });
+			expect(next).toEqual({ kind: "probing", peer: alice });
 		});
 	}
 
@@ -158,14 +163,73 @@ describe("connectionMachine — user-disconnect prints immediately", () => {
 	});
 });
 
+describe("connectionMachine — the liveness probe", () => {
+	const PROBING: ConnectionPhase = { kind: "probing", peer: alice };
+
+	it("enters retrying at attempt 1 when the peer's process is alive", () => {
+		const { phase, effects } = reduce(PROBING, { kind: "probe-result", outcome: "alive" });
+		expect(phase).toEqual({ kind: "retrying", peer: alice, attempt: 1 });
+		expect(kinds(effects)).toContain("schedule-retry");
+	});
+
+	it("enters retrying at attempt 1 when the peer is unreachable (partition)", () => {
+		const { phase, effects } = reduce(PROBING, { kind: "probe-result", outcome: "unreachable" });
+		expect(phase).toEqual({ kind: "retrying", peer: alice, attempt: 1 });
+		expect(kinds(effects)).toContain("schedule-retry");
+	});
+
+	it("does NOT retry when the peer's signaling port refuses — the process is gone", () => {
+		// This is the screenshot bug: a peer whose app exited (without its
+		// bye reaching us) used to get a full 5-attempt redial loop.
+		// ECONNREFUSED proves the process is gone, so we say so and stop.
+		const { phase, effects } = reduce(PROBING, { kind: "probe-result", outcome: "refused" });
+		expect(phase).toEqual(IDLE_PHASE);
+		expect(kinds(effects)).not.toContain("schedule-retry");
+		expect(messages(effects)[0]).toContain("no longer running");
+	});
+
+	it("ignores a stale probe result outside the probing phase", () => {
+		for (const phase of [IDLE_PHASE, ONLINE, DIALING, RETRYING]) {
+			const { phase: next, effects } = reduce(phase, { kind: "probe-result", outcome: "alive" });
+			expect(next).toEqual(phase);
+			expect(effects).toEqual([]);
+		}
+	});
+
+	it("does not re-probe on closes that happen mid-retry", () => {
+		// The first probe already established the process was alive (or
+		// unreachable); a subsequent transport close keeps walking the
+		// backoff table instead of probing again.
+		const { effects } = reduce(RETRYING, closed("network"));
+		expect(kinds(effects)).toContain("schedule-retry");
+		expect(kinds(effects)).not.toContain("probe-peer");
+	});
+
+	it("absorbs a duplicate terminal event while probing", () => {
+		const { phase, effects } = reduce(PROBING, closed("network"));
+		expect(phase).toEqual(PROBING);
+		expect(effects).toEqual([]);
+	});
+
+	it("a final close still wins over an in-flight probe", () => {
+		// The peer's HTTP bye arrived while we were probing: the farewell
+		// path applies unchanged and the eventual probe result is stale.
+		const { phase, effects } = reduce(PROBING, closed("remote-exit"));
+		expect(phase).toEqual(IDLE_PHASE);
+		expect(messages(effects)).toEqual(["alice left the chat."]);
+	});
+});
+
 describe("connectionMachine — backoff progression", () => {
 	it("walks the backoff table across successive failures", () => {
-		let phase: ConnectionPhase = ONLINE;
-		const delays: number[] = [];
-
-		const first = reduce(phase, closed("network"));
-		phase = first.phase;
-		delays.push(delayOf(first.effects));
+		// Enter the retry loop the way production does: a transport close
+		// from `online`, then a probe that finds the peer alive.
+		const entered = reduce(reduce(ONLINE, closed("network")).phase, {
+			kind: "probe-result",
+			outcome: "alive",
+		});
+		let phase: ConnectionPhase = entered.phase;
+		const delays: number[] = [delayOf(entered.effects)];
 
 		for (let i = 1; i < MAX_RECONNECT_ATTEMPTS; i++) {
 			const round = reduce(phase, { kind: "dial-failed" });
@@ -227,8 +291,8 @@ describe("connectionMachine — user actions", () => {
 		const { phase, effects } = reduce(ONLINE, { kind: "user-disconnect" });
 		// Phase deliberately unchanged: the terminal event is the single
 		// source of truth for the TRANSITION. The notice, however, is printed
-		// here, not on the wire event — otherwise the user sees nothing for
-		// up to 400ms while the bye drains.
+		// here, not on the wire event — otherwise the user sees nothing
+		// while the HTTP bye round trip completes.
 		expect(phase).toEqual(ONLINE);
 		expect(effects).toContainEqual({ kind: "close-graceful", reason: "local-disconnect" });
 		expect(messages(effects)).toEqual(["Disconnected from alice (192.168.1.10:4242)"]);
@@ -359,6 +423,7 @@ describe("toStatusBarStatus", () => {
 		expect(toStatusBarStatus(IDLE_PHASE)).toBe("offline");
 		expect(toStatusBarStatus(DIALING)).toBe("connecting");
 		expect(toStatusBarStatus(ONLINE)).toBe("online");
+		expect(toStatusBarStatus({ kind: "probing", peer: alice })).toBe("reconnecting");
 		expect(toStatusBarStatus(RETRYING)).toBe("reconnecting");
 	});
 });

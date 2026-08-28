@@ -10,27 +10,6 @@ function errorText(err: unknown): string {
 }
 
 /**
- * Upper bound on how long a graceful close waits for the `bye` to leave the
- * data channel before killing the pc under it. `sendBye` only queues bytes
- * in werift's channel; `pc.close()` right after would discard them, and a
- * dropped `bye` means the peer falls back to auto-redialing a peer that
- * deliberately left — an intermittent version of the very bug this fixes.
- * On a LAN the flush is sub-millisecond, so this ceiling is pure insurance.
- */
-const BYE_FLUSH_TIMEOUT_MS = 200;
-
-/**
- * How long to let a still-negotiating data channel come up before giving up
- * on the `bye`. `connect()` resolves once the answer SDP is applied, which
- * can be before SCTP has the channel open — a `/disconnect` inside that
- * window would otherwise drop the bye and leave the peer redialing us.
- */
-const BYE_OPEN_TIMEOUT_MS = 200;
-
-/** Poll interval for the flush wait — short, since we expect one tick at most. */
-const BYE_FLUSH_POLL_MS = 5;
-
-/**
  * Information surfaced to app code when a remote peer sends an offer
  * to our signaling server (i.e. we are the receiver).
  *
@@ -161,6 +140,28 @@ export class PeerConnection {
 				this.pendingCandidates = [...this.pendingCandidates, candidate];
 			}
 		});
+
+		// Authoritative teardown-intent channel (TCP). Unlike the in-band
+		// DataChannel `bye`, this cannot race the sender's pc teardown: the
+		// sender awaits the HTTP response before calling `pc.close()`, so by
+		// the time any SCTP ABORT is on the wire the reason is already
+		// recorded here. Forward to the live session — a bye for a session
+		// we already replaced is stale and the `terminated` guard in the
+		// (possibly already-closed) current session absorbs double delivery.
+		this.signaling.onBye((bye) => {
+			const session = this.session;
+			const endpoint = session?.remoteEndpoint;
+			if (!session || !endpoint) return;
+			// Identity check: the bye must be from the peer our LIVE session
+			// is talking to. A late bye from a previous peer (their teardown
+			// raced our new handshake) would otherwise tear down the wrong
+			// session — the payload carries no channel identity of its own.
+			if (endpoint.host !== bye.fromHost || endpoint.port !== bye.fromPort) {
+				getLogger().warn({ bye }, "ignoring bye from an endpoint that is not the live session");
+				return;
+			}
+			session.receiveRemoteBye(bye.reason);
+		});
 	}
 
 	getSignalingPort(): number {
@@ -275,10 +276,17 @@ export class PeerConnection {
 	}
 
 	/**
-	 * Send a `bye`, give it a bounded window to leave the wire, then close.
-	 * Use this wherever the peer should learn the teardown was intentional
-	 * (`/exit`, `/disconnect`); it is the difference between the far end
-	 * saying "they left" and burning a 28-second redial window.
+	 * Deliver teardown intent to the peer over the signaling channel
+	 * (TCP), wait for it to be recorded there, THEN close. This is what
+	 * makes the far end say "they left" instead of burning a 28-second
+	 * redial window — and it is reliable by construction, unlike the
+	 * in-band DataChannel `bye` it replaces: an in-band goodbye races the
+	 * SCTP ABORT that `pc.close()` queues behind it, and three generations
+	 * of sender-side flush workarounds (waiting on `bufferedAmount`, on
+	 * werift's outboundQueue, forcing `sctp.transmit()`) could never close
+	 * that race because the guarantee lives on the receiver. Awaiting an
+	 * HTTP 200 IS the guarantee: the peer's `/bye` handler has already run
+	 * before any teardown byte leaves this process.
 	 *
 	 * `stopSignaling` mirrors the {@link close} vs {@link disconnect} split.
 	 */
@@ -287,39 +295,34 @@ export class PeerConnection {
 		stopSignaling = reason === "local-exit",
 	): Promise<void> {
 		// Set the intent BEFORE any await so a `connect()` that resolves
-		// stale during the bufferedAmount wait reads the right reason out of
+		// stale during the HTTP bye reads the right reason out of
 		// `closeStaleDialSession`. See `closeIntent`'s note.
 		this.closeIntent = reason;
 		const session = this.session;
 		if (session) {
-			// A channel that is still "connecting" (SCTP association coming up
-			// right after the handshake) would silently swallow the bye, and
-			// the peer would fall back to redialing us. Wait it out — bounded,
-			// and a no-op in the normal case where the channel is long open.
-			await this.waitUntil(() => session.canSendBye, BYE_OPEN_TIMEOUT_MS);
-			// A concurrent `swapSession` (e.g. an incoming offer racing our
-			// teardown, or a retry's `close-active-session` + `connect`) could
-			// have replaced `this.session` while we were waiting. Bail out so
-			// we do not send a bye on a session the peer no longer shares, or
-			// tear down a session that belongs to someone else's call.
-			if (this.session !== session) return;
-			session.sendBye(reason === "local-exit" ? "exit" : "disconnect");
-			// `sendBye` only queues bytes; `pc.close()` right after would
-			// discard them. Two failure modes to defend against:
-			//   (a) T3-rtx armed — werift's `sctp.send` does NOT call
-			//       `transmit()` when T3 is set; it queues to `outboundQueue`
-			//       and resolves with `setImmediate`. `outboundQueue.length`
-			//       stays > 0 until T3 fires (up to rto away). Waiting
-			//       200 ms is not enough on a busy session.
-			//   (b) Even after `transmit()` runs, `pc.close()` queues ABORT
-			//       which races the BYE on the wire; if the BYE hasn't
-			//       reached the peer before ABORT triggers teardown, the
-			//       peer falls back to "network" classification.
-			// Force werift to drain the outbound queue NOW so BYE reaches
-			// the network stack before we tear down the pc. transmit() is
-			// the same drain loop T3-rtx would have eventually run — we
-			// just don't wait for it.
-			await this.flushByeNow(session);
+			const byeReason = reason === "local-exit" ? ("exit" as const) : ("disconnect" as const);
+			// Compat shim for pre-HTTP-bye builds: they only understand the
+			// in-band message. Best-effort, no flush — see `Session.sendBye`.
+			session.sendBye(byeReason);
+			const endpoint = session.remoteEndpoint;
+			if (endpoint) {
+				try {
+					await this.signaling.sendBye(endpoint.host, endpoint.port, byeReason, {
+						host: this.localSignalingHost,
+						port: this.signaling.getPort(),
+					});
+				} catch (err) {
+					// ECONNREFUSED → the peer's process is already gone, there is
+					// nobody to inform. Timeout/404 (old build) → degrade to the
+					// in-band best-effort behaviour. Either way the local close
+					// the user asked for must proceed.
+					getLogger().warn({ err: errorText(err), reason }, "http bye not delivered");
+				}
+			}
+			// A concurrent `swapSession` (an incoming offer racing our
+			// teardown) could have replaced `this.session` while the HTTP
+			// round trip was in flight. Bail out rather than tear down a
+			// session that belongs to someone else's call.
 			if (this.session !== session) return;
 		}
 		this.closeSession(reason);
@@ -330,61 +333,6 @@ export class PeerConnection {
 			// path awaits this method before Ink's `exit()`, so awaiting
 			// would hang the whole shutdown behind a remote socket.
 			this.signaling.stop().catch(() => {});
-		}
-	}
-
-	/**
-	 * Poll `condition` until it holds or `timeoutMs` elapses. Never rejects: a
-	 * missed deadline degrades the bye to best-effort, it does not block the
-	 * close the user asked for.
-	 */
-	private async waitUntil(condition: () => boolean, timeoutMs: number): Promise<void> {
-		const ticks = Math.ceil(timeoutMs / BYE_FLUSH_POLL_MS);
-		for (let tick = 0; tick < ticks; tick++) {
-			if (condition()) return;
-			await new Promise<void>((resolve) => setTimeout(resolve, BYE_FLUSH_POLL_MS));
-		}
-		if (!condition()) {
-			getLogger().warn({ timeoutMs }, "bye deadline missed — closing anyway");
-		}
-	}
-
-	/**
-	 * Drain werift's SCTP outbound queue right now, regardless of T3-rtx.
-	 *
-	 * `sctp.send()` only calls `transmit()` when T3 is unset; on a session
-	 * with recent unACKed traffic T3 is armed and the BYE (or any chunk)
-	 * lands in `outboundQueue` without ever reaching `sendChunk`. Awaiting
-	 * `transmit()` here runs the same drain loop T3 would eventually fire,
-	 * but synchronously relative to the close path — the BYE leaves the
-	 * SCTP layer before `pc.close()` queues ABORT, so the BYE reaches the
-	 * peer ahead of teardown and `handleRemoteBye` lands first.
-	 *
-	 * `pc.sctpTransport.sctp.transmit` is exposed at runtime but absent
-	 * from werift's `.d.ts`; the cast is the bridge. If the bridge fails
-	 * (e.g. pc never established SCTP — guarded by `canSendBye` above)
-	 * we silently no-op and degrade to best-effort.
-	 */
-	private async flushByeNow(session: Session): Promise<void> {
-		const sctp = (
-			session as unknown as {
-				pc?: {
-					sctpTransport?: {
-						sctp?: { transmit?: () => Promise<void> };
-					};
-				};
-			}
-		).pc?.sctpTransport?.sctp;
-		if (!sctp?.transmit) {
-			// Bridge unavailable — fall back to the bounded wait, same
-			// as the pre-fix behaviour.
-			await this.waitUntil(() => session.hasFlushedOutbound, BYE_FLUSH_TIMEOUT_MS);
-			return;
-		}
-		try {
-			await sctp.transmit();
-		} catch (err) {
-			getLogger().warn({ err: errorText(err) }, "bye flush transmit failed");
 		}
 	}
 

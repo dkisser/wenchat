@@ -10,6 +10,14 @@ paths: ["packages/core/**"]
 
 If you change bind logic, also re-run `bun scripts/smoke-lan-bind.ts` and verify the regressions it asserts.
 
+## Teardown intent goes over HTTP, never the data channel
+
+The signaling server carries four endpoints: `/offer`, `/candidate`, `/bye`, `/health`. The `/bye` endpoint is the authoritative "I left on purpose" signal — `PeerConnection.closeGracefully` awaits the HTTP 200 before calling `pc.close()`, so the peer has recorded the reason before any SCTP ABORT exists. Do NOT reintroduce in-band goodbyes as the primary mechanism: a DataChannel `bye` races the ABORT that teardown queues behind it, and no sender-side flush (bufferedAmount, werift outboundQueue, forcing `sctp.transmit()`) can close that race — the guarantee lives on the receiver. `Session.sendBye` survives only as a best-effort compat shim for pre-`/bye` builds.
+
+`/bye` payloads carry `fromHost`/`fromPort` and the receiver matches them against the live session's remote endpoint — keep that check: a late bye from a previous peer must not tear down a new session.
+
+`/health` backs `probeSignaling()`, which the CLI uses before the first auto-reconnect to tell "peer's process exited" (ECONNREFUSED → don't redial) from "network partition" (timeout → redial). Note the runtime split: Node's undici reports refusal as `cause.code === "ECONNREFUSED"`, Bun as top-level `code === "ConnectionRefused"` — the classifier accepts both.
+
 ## Multi-homed hosts
 
 `getLanHost()` picks the first non-internal IPv4 in `os.networkInterfaces()` enumeration order. On a multi-homed host with several NICs (e.g. Wi-Fi + wired + VPN), that choice is implementation-defined — which is why the CLI now shows a startup picker (`listBindCandidates()` + `HostPicker`) whenever no host was passed on an interactive run. The third CLI positional arg still overrides everything.

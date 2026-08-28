@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { FileReceiver, PeerConnection } from "@wenchat/core";
+import { probeSignaling } from "@wenchat/core";
 import type { Message, PeerInfo, TextMessage } from "@wenchat/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { appendCapped } from "./appendCapped";
@@ -32,6 +33,14 @@ export type ConnectionMachineBindings = {
 	readonly appendSystemMessage: (text: string) => void;
 	/** Populated when the user has dialed anyone — survives every phase. */
 	readonly lastPeerRef: React.MutableRefObject<PeerInfo | null>;
+	/**
+	 * Resolves once the in-flight `closeGracefully` (if any) has delivered
+	 * its HTTP bye and torn the session down. The `/exit` path awaits this
+	 * before unmounting Ink so the process cannot die with the bye still in
+	 * flight — bounded internally by `BYE_TIMEOUT_MS`, so it cannot hang
+	 * shutdown either.
+	 */
+	readonly awaitGracefulClose: () => Promise<void>;
 };
 
 export function useConnectionMachine(
@@ -53,6 +62,10 @@ export function useConnectionMachine(
 	// effect executor (`schedule-retry` / `cancel-retry`) and by the
 	// cleanup effect below — never by a command handler.
 	const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+	// The in-flight graceful close, so the `/exit` path can await the HTTP
+	// bye before letting the process die. See `awaitGracefulClose` below.
+	const gracefulCloseRef = useRef<Promise<void> | null>(null);
 
 	const [phase, setPhase] = useState<ConnectionPhase>(IDLE_PHASE);
 	const phaseRef = useRef<ConnectionPhase>(phase);
@@ -83,6 +96,13 @@ export function useConnectionMachine(
 	// `useCallback` dependency (and no stale closure either — every
 	// dependency is itself stable).
 	const dispatchRef = useRef<(event: MachineEvent) => void>(() => {});
+
+	const awaitGracefulClose = useCallback(async () => {
+		// A stale (already-resolved) promise from an earlier /disconnect is
+		// fine to await — it settles immediately. Never rejects: a failure
+		// here must not crash the process on its way out.
+		await (gracefulCloseRef.current ?? Promise.resolve()).catch(() => {});
+	}, []);
 
 	const runDial = useCallback(
 		async (peer: PeerInfo) => {
@@ -121,6 +141,16 @@ export function useConnectionMachine(
 				case "dial":
 					void runDial(effect.peer);
 					return;
+				case "probe-peer":
+					// Pre-reconnect liveness check. The result re-enters the
+					// machine as an event; the reducer decides whether the
+					// outcome still matters (it is ignored outside `probing`).
+					void probeSignaling(effect.peer.signalingHost, effect.peer.signalingPort).then(
+						(outcome) => {
+							dispatchRef.current({ kind: "probe-result", outcome });
+						},
+					);
+					return;
 				case "close-active-session":
 					// Release the dead session's UDP/STUN resources so the new
 					// pc's ICE gather doesn't stall against the closed pc's
@@ -128,7 +158,7 @@ export function useConnectionMachine(
 					peerConnection.closeActiveSession();
 					return;
 				case "close-graceful":
-					void peerConnection.closeGracefully(effect.reason);
+					gracefulCloseRef.current = peerConnection.closeGracefully(effect.reason);
 					return;
 				case "invalidate-dials":
 					connectionGenerationRef.current++;
@@ -166,5 +196,5 @@ export function useConnectionMachine(
 	// a torn-down PeerConnection.
 	useEffect(() => () => cancelReconnectTimer(), [cancelReconnectTimer]);
 
-	return { phase, phaseRef, dispatch, appendSystemMessage, lastPeerRef };
+	return { phase, phaseRef, dispatch, appendSystemMessage, lastPeerRef, awaitGracefulClose };
 }

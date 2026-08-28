@@ -1,5 +1,6 @@
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { ByeReason } from "@wenchat/protocol";
 import { getLogger } from "./logger";
 
 export type SdpPayload = {
@@ -14,6 +15,81 @@ export type IceCandidatePayload = {
 	sdpMid?: string;
 	sdpMLineIndex?: number;
 };
+
+/**
+ * Out-of-band teardown intent. This is the AUTHORITATIVE "I left on
+ * purpose" signal — it travels over TCP, so the sender can await the 200
+ * and know the peer recorded the reason before any WebRTC teardown
+ * begins. The in-band DataChannel `bye` could never guarantee that: it
+ * races the SCTP ABORT that `pc.close()` queues right behind it, and the
+ * receiver may dispatch the close before the message.
+ *
+ * `fromHost`/`fromPort` identify the sender's own signaling endpoint.
+ * The receiver matches them against its live session's remote endpoint so
+ * a LATE bye (the sender tore down, we already moved on to a new peer)
+ * cannot tear down the wrong session.
+ */
+export type ByePayload = {
+	readonly reason: ByeReason;
+	readonly fromHost: string;
+	readonly fromPort: number;
+};
+
+/** Upper bound for the HTTP bye round trip. A `/exit` awaits this before
+ * the process dies, so it must be bounded even when the peer's host is
+ * unreachable (a TCP connect to a black-holed peer would otherwise stall
+ * shutdown for the kernel's full connect timeout). */
+export const BYE_TIMEOUT_MS = 1000;
+
+/** Upper bound for the pre-reconnect liveness probe. */
+export const PROBE_TIMEOUT_MS = 1000;
+
+/**
+ * What a liveness probe learned about a peer's signaling port.
+ *
+ * - `alive` — an HTTP response came back (any status; a 404 from an older
+ *   build without `/health` still proves the process is up).
+ * - `refused` — TCP ECONNREFUSED: the host is up but nothing listens, i.e.
+ *   the peer's process exited. Retrying is pointless.
+ * - `unreachable` — timeout or any other network error: a partition the
+ *   peer cannot answer through. Retrying is the right call.
+ */
+export type ProbeResult = "alive" | "refused" | "unreachable";
+
+/**
+ * Walk the `cause` chain looking for a TCP-level connection refusal.
+ * Two runtimes, two shapes: Node's undici wraps the socket error
+ * (`cause.code === "ECONNREFUSED"`) in a `TypeError("fetch failed")`,
+ * while Bun puts `code: "ConnectionRefused"` on the top-level error.
+ * Tests run on Bun, the CLI on Node — both must classify as `refused`.
+ */
+function isConnectionRefused(err: unknown): boolean {
+	let current: unknown = err;
+	while (current instanceof Error) {
+		const code = (current as { code?: string }).code;
+		if (code === "ECONNREFUSED" || code === "ConnectionRefused") return true;
+		current = current.cause;
+	}
+	return false;
+}
+
+/**
+ * Probe a peer's signaling server to tell "process exited" apart from
+ * "network partitioned" after a transport-level close. The reconnect
+ * logic uses this to avoid redialing a peer that is simply gone.
+ */
+export async function probeSignaling(
+	host: string,
+	port: number,
+	timeoutMs = PROBE_TIMEOUT_MS,
+): Promise<ProbeResult> {
+	try {
+		await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+		return "alive";
+	} catch (err) {
+		return isConnectionRefused(err) ? "refused" : "unreachable";
+	}
+}
 
 /**
  * Hard cap on a signaling request body. SDP offers/answers and ICE
@@ -34,6 +110,7 @@ export class SignalingServer {
 	private server?: Server;
 	private offerCallback?: (offer: SdpPayload) => SdpPayload | Promise<SdpPayload>;
 	private candidateCallback?: (candidate: IceCandidatePayload) => void;
+	private byeCallback?: (bye: ByePayload) => void;
 
 	async start(port: number, host = "0.0.0.0"): Promise<void> {
 		return new Promise((resolve, reject) => {
@@ -79,6 +156,13 @@ export class SignalingServer {
 		};
 	}
 
+	onBye(callback: (bye: ByePayload) => void): () => void {
+		this.byeCallback = callback;
+		return () => {
+			this.byeCallback = undefined;
+		};
+	}
+
 	async sendOffer(host: string, port: number, offer: SdpPayload): Promise<SdpPayload> {
 		const response = await fetch(`http://${host}:${port}/offer`, {
 			method: "POST",
@@ -99,6 +183,32 @@ export class SignalingServer {
 		});
 		if (!response.ok) {
 			throw new Error(`Signaling candidate failed: ${response.status}`);
+		}
+	}
+
+	/**
+	 * Deliver teardown intent over TCP. Awaited by the graceful-close path:
+	 * a resolved promise means the peer's `/bye` handler ran and the reason
+	 * is recorded there — only then is it safe to tear down the WebRTC pc.
+	 * Throws on non-2xx (e.g. a pre-`/bye` peer answering 404) and on
+	 * network failure (ECONNREFUSED = peer already gone; timeout bounded by
+	 * {@link BYE_TIMEOUT_MS}).
+	 */
+	async sendBye(
+		host: string,
+		port: number,
+		reason: ByeReason,
+		from: { readonly host: string; readonly port: number },
+	): Promise<void> {
+		const payload: ByePayload = { reason, fromHost: from.host, fromPort: from.port };
+		const response = await fetch(`http://${host}:${port}/bye`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(payload),
+			signal: AbortSignal.timeout(BYE_TIMEOUT_MS),
+		});
+		if (!response.ok) {
+			throw new Error(`Signaling bye failed: ${response.status}`);
 		}
 	}
 
@@ -129,6 +239,28 @@ export class SignalingServer {
 			} else if (url === "/candidate" && req.method === "POST") {
 				const candidate = JSON.parse(body) as IceCandidatePayload;
 				this.candidateCallback?.(candidate);
+				res.writeHead(200);
+				res.end();
+			} else if (url === "/bye" && req.method === "POST") {
+				const bye = JSON.parse(body) as ByePayload;
+				// Validate at the boundary — a garbage reason must not reach the
+				// session layer, where it would map onto the CloseReason union.
+				if (
+					(bye.reason !== "exit" && bye.reason !== "disconnect") ||
+					typeof bye.fromHost !== "string" ||
+					!Number.isInteger(bye.fromPort) ||
+					bye.fromPort <= 0
+				) {
+					res.writeHead(400, { "Content-Type": "application/json" });
+					res.end(JSON.stringify({ error: "Invalid bye payload" }));
+					return;
+				}
+				this.byeCallback?.(bye);
+				res.writeHead(200);
+				res.end();
+			} else if (url === "/health" && req.method === "GET") {
+				// Liveness probe for the pre-reconnect check. The payload is
+				// irrelevant — an answer of any kind proves the process is up.
 				res.writeHead(200);
 				res.end();
 			} else {
