@@ -7,6 +7,49 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-08-28
+
+### Added
+
+- **Blank row between chat messages.** The chat viewport now inserts an
+  inter-message spacing row above each non-system entry, so consecutive
+  turns from alternating speakers read as discrete messages instead of a
+  running wall of text.
+
+### Fixed
+
+- **`/bye` now reliably reaches the peer before the session tears down.**
+  The previous flow queued the bye and immediately called `pc.close()`,
+  but werift's SCTP layer was still buffered — the message sat in the
+  outbound queue and was dropped when the data channel closed. Three
+  follow-up fixes chain on each other: `PeerConnection.closeGracefully()`
+  now (1) waits for the SCTP outbound queue to drain after sending, (2)
+  forces a `sctp.transmit()` so the writer commits the final buffer, and
+  (3) signals teardown intent out-of-band over the signaling HTTP `/bye`
+  endpoint before the channel closes at all. Because the receiver needs
+  that intent to distinguish "peer left on purpose" from "network
+  partition" (otherwise both look like a `'closed'` event), the `/bye`
+  HTTP path is now the authoritative one; `Session.sendBye` survives as
+  a best-effort compat shim for pre-`/bye` builds.
+
+- **Signaling `/bye` payloads carry `fromHost` / `fromPort`.** A late
+  HTTP `/bye` from a previous peer (same nickname, different network
+  endpoint) used to tear down the new session; the receiver now matches
+  the bye against its live session's remote endpoint and ignores
+  mismatches.
+
+- **Probe the signaling endpoint before reconnecting.** When a peer
+  process exits, `ECONNREFUSED` reaches us before any retry timer does;
+  when the LAN partitions, the request hangs until timeout. The CLI now
+  distinguishes the two via a `/health` probe, so a peer's deliberate
+  departure doesn't burn the backoff window redialing someone who isn't
+  there.
+
+- **8 MiB file-transfer test timeout raised to dodge Linux CI flakiness.**
+  The integration test that wires two peers on `127.0.0.1` for an
+  end-to-end file transfer occasionally ran out of its old budget under
+  load; the test, not the production code, was too tight.
+
 ## [0.1.9] - 2026-08-27
 
 ### Fixed
