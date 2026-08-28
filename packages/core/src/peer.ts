@@ -305,14 +305,21 @@ export class PeerConnection {
 			if (this.session !== session) return;
 			session.sendBye(reason === "local-exit" ? "exit" : "disconnect");
 			// `sendBye` only queues bytes; `pc.close()` right after would
-			// discard them. Use werift's SCTP `outboundQueue.length` as the
-			// real flush signal — `transport.bufferedAmount` drops to 0 the
-			// instant `sctp.send()` resolves, which on a session with T3-rtx
-			// armed (any unACKed traffic in the last RTO) happens BEFORE
-			// `transmit()` ever runs. Waiting on `bufferedAmount` let the
-			// pc.close()-after-BYErace slip through and surface on the peer
-			// as a `network` close, re-triggering auto-retry.
-			await this.waitUntil(() => session.hasFlushedOutbound, BYE_FLUSH_TIMEOUT_MS);
+			// discard them. Two failure modes to defend against:
+			//   (a) T3-rtx armed — werift's `sctp.send` does NOT call
+			//       `transmit()` when T3 is set; it queues to `outboundQueue`
+			//       and resolves with `setImmediate`. `outboundQueue.length`
+			//       stays > 0 until T3 fires (up to rto away). Waiting
+			//       200 ms is not enough on a busy session.
+			//   (b) Even after `transmit()` runs, `pc.close()` queues ABORT
+			//       which races the BYE on the wire; if the BYE hasn't
+			//       reached the peer before ABORT triggers teardown, the
+			//       peer falls back to "network" classification.
+			// Force werift to drain the outbound queue NOW so BYE reaches
+			// the network stack before we tear down the pc. transmit() is
+			// the same drain loop T3-rtx would have eventually run — we
+			// just don't wait for it.
+			await this.flushByeNow(session);
 			if (this.session !== session) return;
 		}
 		this.closeSession(reason);
@@ -339,6 +346,45 @@ export class PeerConnection {
 		}
 		if (!condition()) {
 			getLogger().warn({ timeoutMs }, "bye deadline missed — closing anyway");
+		}
+	}
+
+	/**
+	 * Drain werift's SCTP outbound queue right now, regardless of T3-rtx.
+	 *
+	 * `sctp.send()` only calls `transmit()` when T3 is unset; on a session
+	 * with recent unACKed traffic T3 is armed and the BYE (or any chunk)
+	 * lands in `outboundQueue` without ever reaching `sendChunk`. Awaiting
+	 * `transmit()` here runs the same drain loop T3 would eventually fire,
+	 * but synchronously relative to the close path — the BYE leaves the
+	 * SCTP layer before `pc.close()` queues ABORT, so the BYE reaches the
+	 * peer ahead of teardown and `handleRemoteBye` lands first.
+	 *
+	 * `pc.sctpTransport.sctp.transmit` is exposed at runtime but absent
+	 * from werift's `.d.ts`; the cast is the bridge. If the bridge fails
+	 * (e.g. pc never established SCTP — guarded by `canSendBye` above)
+	 * we silently no-op and degrade to best-effort.
+	 */
+	private async flushByeNow(session: Session): Promise<void> {
+		const sctp = (
+			session as unknown as {
+				pc?: {
+					sctpTransport?: {
+						sctp?: { transmit?: () => Promise<void> };
+					};
+				};
+			}
+		).pc?.sctpTransport?.sctp;
+		if (!sctp?.transmit) {
+			// Bridge unavailable — fall back to the bounded wait, same
+			// as the pre-fix behaviour.
+			await this.waitUntil(() => session.hasFlushedOutbound, BYE_FLUSH_TIMEOUT_MS);
+			return;
+		}
+		try {
+			await sctp.transmit();
+		} catch (err) {
+			getLogger().warn({ err: errorText(err) }, "bye flush transmit failed");
 		}
 	}
 
