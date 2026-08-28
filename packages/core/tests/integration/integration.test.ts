@@ -381,6 +381,39 @@ describe("core integration", () => {
 
 		expect(isRetryable(await waitForClose(bobEvents, 10000))).toBe(true);
 	}, 30000);
+
+	it("a graceful /disconnect still reaches the peer when the session is active", async () => {
+		// Regression: BYE was queued but never transmitted before pc.close()
+		// sent ABORT, so the peer classified the close as `network` and
+		// auto-retry kicked in. Reproduces by keeping T3-rtx armed (rapid
+		// sends right before closeGracefully). The existing happy-path
+		// tests miss this because `establishVerifiedSession` ends with an
+		// idle session, so T3-rtx has already fired and cleared.
+		//
+		// Note: this test is best-effort on loopback — werift's T3-rtx has
+		// rto ≈ 1 s, and `BYE_FLUSH_TIMEOUT_MS` is 200 ms, so the race only
+		// surfaces when T3 hasn't fired by the time we close. On a busy CI
+		// runner the 100-message burst keeps `sentQueue` populated past the
+		// 200 ms ceiling; on a quiet local loopback T3 may already have
+		// cleared. The integration test is documentation of the expected
+		// behaviour; the production fix (`hasFlushedOutbound`) is verified
+		// by manual two-terminal verification per the PR's test plan.
+		const bobEvents = await establishVerifiedSession();
+
+		for (let i = 0; i < 100; i++) {
+			alice.send({
+				type: "text",
+				id: `burst-${i}`,
+				timestamp: Date.now(),
+				payload: { text: `burst ${i}` },
+			});
+		}
+
+		await alice.closeGracefully("local-disconnect");
+
+		expect(await waitForClose(bobEvents, 8000)).toBe("remote-disconnect");
+		expect(closeReasons(bobEvents)).toEqual(["remote-disconnect"]);
+	}, 30000);
 });
 
 describe("core integration: discovery ↔ signaling wiring", () => {

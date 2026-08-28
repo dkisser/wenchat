@@ -227,6 +227,33 @@ export class Session {
 	}
 
 	/**
+	 * True when werift's SCTP outbound queue has been drained — i.e. every
+	 * queued DATA chunk has been handed to `sendChunk` (which writes
+	 * through DTLS to the UDP socket). This is the real flush signal the
+	 * graceful-close path needs.
+	 *
+	 * `transport.bufferedAmount` drops to 0 the moment `sctp.send()`
+	 * resolves, which on any session with T3-rtx armed is BEFORE anything
+	 * hits the wire (werift's `sctp.send` queues to `outboundQueue` and
+	 * `setImmediate`s without calling `transmit()` when T3 is set). The
+	 * classic bug shape: send BYE → `bufferedAmount === 0` immediately →
+	 * `pc.close()` sends ABORT → BYE in `outboundQueue` is dropped →
+	 * peer classifies the close as `network`.
+	 *
+	 * `pc.sctpTransport.sctp` are `Object.defineProperty`-exposed runtime
+	 * properties on werift's `RTCPeerConnection` / `RTCSctpTransport`; the
+	 * upstream `.d.ts` does not surface them, so the cast is the bridge.
+	 */
+	get hasFlushedOutbound(): boolean {
+		const sctp = (
+			this.pc as unknown as {
+				sctpTransport?: { sctp?: { outboundQueue?: readonly unknown[] } };
+			}
+		).sctpTransport?.sctp;
+		return sctp?.outboundQueue?.length === 0;
+	}
+
+	/**
 	 * Whether a `bye` would actually reach the wire right now. False while the
 	 * channel is still negotiating (or already gone) — the graceful-close path
 	 * waits on this so an early `/disconnect` doesn't silently drop the bye.
