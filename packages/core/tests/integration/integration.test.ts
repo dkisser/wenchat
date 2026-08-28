@@ -383,21 +383,13 @@ describe("core integration", () => {
 	}, 30000);
 
 	it("a graceful /disconnect still reaches the peer when the session is active", async () => {
-		// Regression: BYE was queued but never transmitted before pc.close()
-		// sent ABORT, so the peer classified the close as `network` and
-		// auto-retry kicked in. Reproduces by keeping T3-rtx armed (rapid
-		// sends right before closeGracefully). The existing happy-path
-		// tests miss this because `establishVerifiedSession` ends with an
-		// idle session, so T3-rtx has already fired and cleared.
-		//
-		// Note: this test is best-effort on loopback — werift's T3-rtx has
-		// rto ≈ 1 s, and `BYE_FLUSH_TIMEOUT_MS` is 200 ms, so the race only
-		// surfaces when T3 hasn't fired by the time we close. On a busy CI
-		// runner the 100-message burst keeps `sentQueue` populated past the
-		// 200 ms ceiling; on a quiet local loopback T3 may already have
-		// cleared. The integration test is documentation of the expected
-		// behaviour; the production fix (`hasFlushedOutbound`) is verified
-		// by manual two-terminal verification per the PR's test plan.
+		// Regression: the in-band BYE used to race the SCTP ABORT that
+		// pc.close() queued behind it, so the peer classified the close as
+		// `network` and auto-retry kicked in — worst when T3-rtx was armed
+		// (rapid sends right before closing). The authoritative bye now
+		// travels over TCP and is AWAITED before any teardown, so the burst
+		// below is no longer a race the test can lose; it stays as a guard
+		// against regressions to in-band delivery.
 		const bobEvents = await establishVerifiedSession();
 
 		for (let i = 0; i < 100; i++) {
@@ -413,6 +405,40 @@ describe("core integration", () => {
 
 		expect(await waitForClose(bobEvents, 8000)).toBe("remote-disconnect");
 		expect(closeReasons(bobEvents)).toEqual(["remote-disconnect"]);
+	}, 30000);
+
+	it("ignores an HTTP bye whose sender endpoint does not match the live session", async () => {
+		// The bye payload carries no channel identity, so the receiver
+		// matches `fromHost`/`fromPort` against its live session's remote
+		// endpoint. A late bye from a PREVIOUS peer (its teardown raced our
+		// new handshake) must not tear down the current session.
+		const bobEvents = await establishVerifiedSession();
+
+		const response = await fetch(`http://127.0.0.1:${bob.getSignalingPort()}/bye`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				reason: "exit",
+				fromHost: "127.0.0.1",
+				fromPort: alice.getSignalingPort() + 1,
+			}),
+		});
+		expect(response.status).toBe(200);
+
+		await sleep(500);
+		expect(closeReasons(bobEvents)).toEqual([]);
+	}, 30000);
+
+	it("a graceful close does not hang when the peer's signaling server is already gone", async () => {
+		// The peer's process died before we could say bye: the HTTP POST
+		// gets ECONNREFUSED and the local close must proceed anyway —
+		// the user asked to leave; there is nobody left to inform.
+		await establishVerifiedSession();
+		await bob.closeGracefully("local-exit");
+
+		// Bob's signaling server is now stopped; alice's bye has nowhere
+		// to land. Must resolve (not hang, not throw) and close locally.
+		await alice.closeGracefully("local-exit");
 	}, 30000);
 });
 

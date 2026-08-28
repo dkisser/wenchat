@@ -204,10 +204,11 @@ export class Session {
 	}
 
 	/**
-	 * Best-effort graceful-close signal. Tells the peer this teardown was
-	 * deliberate so it does not spend a reconnect-backoff window redialing
-	 * us. Never throws: if the channel is already gone there is nobody to
-	 * tell, and the peer falls back to the network-loss path.
+	 * Best-effort IN-BAND compat shim: peers from before the HTTP `/bye`
+	 * endpoint only understand a DataChannel `bye`. It races teardown and
+	 * may be dropped — the authoritative intent signal is the HTTP bye
+	 * (`SignalingServer.sendBye`), which `PeerConnection.closeGracefully`
+	 * awaits before closing the pc. Never throws.
 	 */
 	sendBye(reason: ByeReason): void {
 		if (!this.transport?.isOpen) return;
@@ -219,47 +220,15 @@ export class Session {
 	}
 
 	/**
-	 * Number of bytes still queued on the data channel. Used by the
-	 * graceful-close path to know whether a just-sent `bye` has left.
+	 * The peer's signaling endpoint, learned during the handshake (from the
+	 * offer payload on the acceptor side, from the dial target on the
+	 * initiator side). The graceful-close path needs it to deliver the HTTP
+	 * bye; null only for offers from protocol versions that predate the
+	 * endpoint fields.
 	 */
-	get bufferedAmount(): number {
-		return this.transport?.bufferedAmount ?? 0;
-	}
-
-	/**
-	 * True when werift's SCTP outbound queue has been drained — i.e. every
-	 * queued DATA chunk has been handed to `sendChunk` (which writes
-	 * through DTLS to the UDP socket). This is the real flush signal the
-	 * graceful-close path needs.
-	 *
-	 * `transport.bufferedAmount` drops to 0 the moment `sctp.send()`
-	 * resolves, which on any session with T3-rtx armed is BEFORE anything
-	 * hits the wire (werift's `sctp.send` queues to `outboundQueue` and
-	 * `setImmediate`s without calling `transmit()` when T3 is set). The
-	 * classic bug shape: send BYE → `bufferedAmount === 0` immediately →
-	 * `pc.close()` sends ABORT → BYE in `outboundQueue` is dropped →
-	 * peer classifies the close as `network`.
-	 *
-	 * `pc.sctpTransport.sctp` are `Object.defineProperty`-exposed runtime
-	 * properties on werift's `RTCPeerConnection` / `RTCSctpTransport`; the
-	 * upstream `.d.ts` does not surface them, so the cast is the bridge.
-	 */
-	get hasFlushedOutbound(): boolean {
-		const sctp = (
-			this.pc as unknown as {
-				sctpTransport?: { sctp?: { outboundQueue?: readonly unknown[] } };
-			}
-		).sctpTransport?.sctp;
-		return sctp?.outboundQueue?.length === 0;
-	}
-
-	/**
-	 * Whether a `bye` would actually reach the wire right now. False while the
-	 * channel is still negotiating (or already gone) — the graceful-close path
-	 * waits on this so an early `/disconnect` doesn't silently drop the bye.
-	 */
-	get canSendBye(): boolean {
-		return this.transport?.isOpen === true;
+	get remoteEndpoint(): { readonly host: string; readonly port: number } | null {
+		if (!this.remoteHost || !this.remotePort) return null;
+		return { host: this.remoteHost, port: this.remotePort };
 	}
 
 	/**
@@ -360,7 +329,7 @@ export class Session {
 			// A `bye` is control plane, not chat: it must never reach the
 			// message listeners or it would land in the chat log.
 			if (message.type === "bye") {
-				this.handleRemoteBye(message.payload.reason);
+				this.receiveRemoteBye(message.payload.reason);
 				return;
 			}
 			for (const listener of this.messageListeners) {
@@ -467,14 +436,17 @@ export class Session {
 	}
 
 	/**
-	 * The peer told us it is leaving on purpose. Tear down immediately with
-	 * the remote reason rather than waiting for its `pc.close()` to
-	 * propagate: that path is asynchronous and unguaranteed, and in the gap
-	 * our own heartbeat watchdog could fire first and relabel the close as
-	 * `heartbeat-timeout` — which reads as retryable and puts us right back
-	 * in the redial loop this whole mechanism exists to avoid.
+	 * The peer told us it is leaving on purpose — via the HTTP `/bye`
+	 * endpoint (authoritative, awaited by the sender before it tears down)
+	 * or, from an older build, an in-band DataChannel `bye` (best-effort).
+	 * Tear down immediately with the remote reason rather than waiting for
+	 * its `pc.close()` to propagate: that path is asynchronous and
+	 * unguaranteed, and in the gap our own heartbeat watchdog could fire
+	 * first and relabel the close as `heartbeat-timeout` — which reads as
+	 * retryable and puts us right back in the redial loop this whole
+	 * mechanism exists to avoid.
 	 */
-	private handleRemoteBye(reason: ByeReason): void {
+	receiveRemoteBye(reason: ByeReason): void {
 		if (this.terminated) return;
 		this.terminated = true;
 		this.stopHeartbeat();

@@ -129,11 +129,8 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 	// hook owns the imperative parts the reducer cannot model; the rest is
 	// the pure machine. Called AFTER `fileReceiver` is constructed so the
 	// transfer-event callback above can use `appendSystemMessage`.
-	const { phase, phaseRef, dispatch, appendSystemMessage, lastPeerRef } = useConnectionMachine(
-		peerConnection,
-		fileReceiver,
-		setMessages,
-	);
+	const { phase, phaseRef, dispatch, appendSystemMessage, lastPeerRef, awaitGracefulClose } =
+		useConnectionMachine(peerConnection, fileReceiver, setMessages);
 	const selectedPeer = phasePeer(phase);
 	// The four-value union `StatusBar`/`Header` render from. Derived, so the
 	// bar can never disagree with the machine about what state we're in.
@@ -359,12 +356,17 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		// `system-message` effect runs inside `dispatch` (which is sync),
 		// so the message is in state before `exit()` returns.
 		dispatch({ kind: "user-exit" });
-		// Fire-and-forget mDNS shutdown — the bounded wait in
-		// `closeGracefully` is irrelevant on this path because the process
-		// is about to die, so the alt-screen release and `exit()` go through
-		// synchronously. `Discovery.stop` is idempotent so the mount-effect
+		// Fire-and-forget mDNS shutdown.
+		// `Discovery.stop` is idempotent so the mount-effect
 		// cleanup that fires during unmount is harmless.
 		discovery.stop().catch(() => {});
+		// Await the HTTP bye BEFORE unmounting: `closeGracefully` resolves
+		// once the peer has recorded our intent (bounded by BYE_TIMEOUT_MS,
+		// so an unreachable peer cannot hang shutdown). Letting the process
+		// die with the bye still in flight is exactly how the peer used to
+		// end up auto-redialing an exited app — the terminal event it
+		// observes then carries no reason and classifies as "network".
+		//
 		// Ink's `exit()` triggers App's componentWillUnmount → final onRender
 		// → cliCursor.show. After the React tree fully unmounts,
 		// `instance.waitUntilExit()` in main.tsx resolves and writes the
@@ -373,7 +375,10 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		// shutdown sequencing to main.tsx keeps the alternate buffer release
 		// and the process exit in the same microtask, so the host terminal
 		// never sees a half-rendered final frame.
-		exit();
+		void (async () => {
+			await awaitGracefulClose();
+			exit();
+		})();
 	};
 
 	const handleConnect = (hostPort: string) => {

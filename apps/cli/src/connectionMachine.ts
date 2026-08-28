@@ -1,4 +1,4 @@
-import type { ConnectionEvent } from "@wenchat/core";
+import type { ConnectionEvent, ProbeResult } from "@wenchat/core";
 import { isRetryable } from "@wenchat/core";
 import type { PeerInfo } from "@wenchat/protocol";
 import type { StatusBarStatus } from "@wenchat/ui";
@@ -33,6 +33,14 @@ export type ConnectionPhase =
 	| { readonly kind: "dialing"; readonly peer: PeerInfo }
 	| { readonly kind: "online"; readonly peer: PeerInfo }
 	/**
+	 * A transport-level close just happened and we are asking the peer's
+	 * signaling server whether its PROCESS is still alive before spending
+	 * a backoff window redialing it. "network" conflates "Wi-Fi blip"
+	 * (retry) with "their app exited without a bye reaching us" (don't
+	 * retry) — the probe settles it. Resolves via `probe-result`.
+	 */
+	| { readonly kind: "probing"; readonly peer: PeerInfo }
+	/**
 	 * A network-driven close is being retried. `attempt` is 1-based and
 	 * indexes {@link RECONNECT_BACKOFF_MS}. The phase covers both "waiting
 	 * for the timer" and "the retry dial is in flight" — the counter is what
@@ -56,6 +64,12 @@ export type MachineEvent =
 	| { readonly kind: "dial-failed" }
 	/** The backoff timer elapsed. */
 	| { readonly kind: "retry-fired" }
+	/**
+	 * The pre-reconnect liveness probe answered. Only meaningful in the
+	 * `probing` phase; anywhere else it is stale (the user moved on) and
+	 * ignored.
+	 */
+	| { readonly kind: "probe-result"; readonly outcome: ProbeResult }
 	/** A connection state event arrived from `@wenchat/core`. */
 	| { readonly kind: "wire"; readonly event: ConnectionEvent }
 	| { readonly kind: "user-disconnect" }
@@ -66,6 +80,12 @@ export type Effect =
 	| { readonly kind: "cancel-retry" }
 	| { readonly kind: "schedule-retry"; readonly delayMs: number }
 	| { readonly kind: "dial"; readonly peer: PeerInfo }
+	/**
+	 * Ask the peer's signaling server whether its process is still alive.
+	 * Runs before the FIRST retry of a transport-level close: a refused
+	 * connection means the peer exited and redialing is pointless.
+	 */
+	| { readonly kind: "probe-peer"; readonly peer: PeerInfo }
 	/** Free the dead session's UDP/STUN resources before the next dial. */
 	| { readonly kind: "close-active-session" }
 	/** Send a `bye`, let it flush, then tear the session down. */
@@ -101,6 +121,7 @@ export function toStatusBarStatus(phase: ConnectionPhase): StatusBarStatus {
 			return "connecting";
 		case "online":
 			return "online";
+		case "probing":
 		case "retrying":
 			return "reconnecting";
 	}
@@ -221,8 +242,31 @@ function handleWire(phase: ConnectionPhase, event: ConnectionEvent): Transition 
 		};
 	}
 	if (isRetryable(event.reason)) {
-		const attempt = phase.kind === "retrying" ? phase.attempt : 1;
-		return scheduleRetry(peer, attempt, [{ kind: "dispose-transfers" }]);
+		// Already probing: a second terminal event from the same dead session
+		// carries nothing new (core dedupes per session, but belt-and-braces).
+		if (phase.kind === "probing") return stay(phase);
+		// Mid-retry: the first probe already established the peer's process
+		// was alive (or unreachable), so keep walking the backoff table.
+		if (phase.kind === "retrying") {
+			return scheduleRetry(peer, phase.attempt, [{ kind: "dispose-transfers" }]);
+		}
+		// First transport-level close from `online`: do NOT redial blind.
+		// "network" / "heartbeat-timeout" conflate a Wi-Fi blip (peer's
+		// process alive — worth redialing) with the peer's process dying
+		// before its HTTP bye reached us (redialing is guaranteed to fail
+		// for 28s). The probe tells them apart: ECONNREFUSED on the
+		// signaling port can only mean the process is gone.
+		return {
+			phase: { kind: "probing", peer },
+			effects: [
+				{ kind: "dispose-transfers" },
+				{ kind: "probe-peer", peer },
+				{
+					kind: "system-message",
+					text: `Lost connection to ${peerLabel(peer)}. Checking whether ${peerLabel(peer)} is still around…`,
+				},
+			],
+		};
 	}
 	// For LOCAL-* reasons the user-facing notice was already printed when
 	// the user action fired (the `user-disconnect` handler prints the
@@ -278,7 +322,8 @@ export function reduce(phase: ConnectionPhase, event: MachineEvent): Transition 
 			//
 			// Older version only checked for `retrying` here, which let a
 			// manual dial racing with an incoming offer leak both sessions.
-			const hadInFlightDial = phase.kind === "retrying" || phase.kind === "dialing";
+			const hadInFlightDial =
+				phase.kind === "retrying" || phase.kind === "dialing" || phase.kind === "probing";
 			return {
 				phase: { kind: "dialing", peer: event.peer },
 				effects: hadInFlightDial
@@ -308,6 +353,31 @@ export function reduce(phase: ConnectionPhase, event: MachineEvent): Transition 
 		case "retry-fired": {
 			if (phase.kind !== "retrying") return stay(phase);
 			return stay(phase, { kind: "close-active-session" }, { kind: "dial", peer: phase.peer });
+		}
+
+		case "probe-result": {
+			// Stale probe (the user /disconnected, or an incoming offer took
+			// the slot while the fetch was in flight) — ignore it anywhere
+			// outside the probing phase.
+			if (phase.kind !== "probing") return stay(phase);
+			if (event.outcome === "refused") {
+				// TCP says the host is up but nothing listens on the
+				// signaling port: the peer's process is gone. Redialing is
+				// guaranteed to fail — say so instead of burning the window.
+				return {
+					phase: IDLE_PHASE,
+					effects: [
+						{
+							kind: "system-message",
+							text: `${peerLabel(phase.peer)} is gone (their app is no longer running). Not reconnecting — try /reconnect or pick another peer once they're back.`,
+						},
+					],
+				};
+			}
+			// "alive": their process is up, only the WebRTC path died — a
+			// fresh handshake can succeed. "unreachable": a partition they
+			// cannot answer through — ride out the backoff table.
+			return scheduleRetry(phase.peer, 1, []);
 		}
 
 		case "retry-now": {
@@ -342,11 +412,11 @@ export function reduce(phase: ConnectionPhase, event: MachineEvent): Transition 
 			if (!peer) return stay(phase);
 			// Print the disconnect notice HERE rather than waiting for the
 			// terminal event to round-trip the same string back: `close-
-			// graceful` sends a `bye`, waits up to 400ms for it to drain, and
-			// only then closes the pc. The terminal event arrives after that
-			// — too late for chat-log responsiveness. Phase is left unchanged
-			// so the resulting wire event is the single source of truth for
-			// the transition itself.
+			// graceful` awaits the HTTP bye round trip before closing the
+			// pc, so the terminal event arrives after that — too late for
+			// chat-log responsiveness. Phase is left unchanged so the
+			// resulting wire event is the single source of truth for the
+			// transition itself.
 			return stay(
 				phase,
 				{ kind: "cancel-retry" },
@@ -369,8 +439,9 @@ export function reduce(phase: ConnectionPhase, event: MachineEvent): Transition 
 			if (!peer) return stay(phase);
 			// Surface the disconnect notice synchronously — same UX detail as
 			// user-disconnect: the user is staring at a terminal about to
-			// close, and `/exit` may not give `closeGracefully` its 400ms to
-			// complete the bye drain before Ink unmounts.
+			// close, and `closeGracefully`'s HTTP round trip — though awaited
+			// by the caller before the process exits — must not delay the
+			// chat-log line.
 			const text =
 				phase.kind === "retrying"
 					? `Reconnect cancelled. Disconnected from ${describePeer(peer)}`
