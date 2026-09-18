@@ -21,7 +21,7 @@ Package-specific gotchas — read on demand when editing those paths:
 
 ## Canonical commands
 
-- `bun install` — install (pinned exact versions per `bunfig.toml`; lockfile is intentionally untracked, see `.gitignore`); never introduce npm/yarn/pnpm lockfiles
+- `bun install` — install (pinned exact versions per `bunfig.toml`; `bun.lock` is tracked and CI enforces it via `--frozen-lockfile` — regenerate and commit it when dependencies change); never introduce npm/yarn/pnpm lockfiles
 - `bun run cli start [nickname] [signalingPort] [signalingHost]` — run the terminal app
   (also accepts `bun run cli start --name <nickname> --port <port> --host <host>`)
 - `bun test` — run all tests (Bun test runner; imports `from "bun:test"`)

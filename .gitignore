@@ -7,10 +7,9 @@ dist-release/
 # Top-level accidental packer output (safety net; packer normally writes to dist-release/)
 /wenchat
 /wenchat.exe
-# Bun lockfile — kept on disk for reproducible `bun install` but intentionally
-# untracked. Contributors regenerate locally; CI installs without --frozen-lockfile.
+# Legacy binary lockfile from pre-1.2 bun. The text lockfile (bun.lock) IS
+# tracked: CI installs with --frozen-lockfile, so keep it in sync with package.json.
 bun.lockb
-bun.lock
 # Internal design docs / plans / specs. Lives in-repo for the maintainer's
 # reference but shouldn't be in the published history.
 docs/superpowers/
