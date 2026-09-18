@@ -73,8 +73,8 @@ There is no `bun run check`; `biome` only lints, it does not typecheck.
 
 Feature-level implementation notes, kept out of this file on purpose — consult when touching the relevant area:
 
-- `docs/devops/cli.md` — `apps/cli` gotchas 
-- `docs/devops/core.md` — `packages/core` gotchas 
+- `docs/devops/cli.md` — `apps/cli` gotchas
+- `docs/devops/core.md` — `packages/core` gotchas
 - `docs/devops/cli-subcommands.md` — CLI subcommand and upgrade behavior spec
 - `docs/devops/ui-rendering.md` — markdown rendering, clipboard, OSC 52, mouse invariants
 - `docs/devops/ci-release.md` — CI pipeline, release workflow, asset naming, versioning details
