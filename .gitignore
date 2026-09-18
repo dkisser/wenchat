@@ -19,3 +19,5 @@ docs/superpowers/
 .env
 #claude
 .claude/
+# Local agent state: imported skills + local AGENTS.md copy. Machine-local; keep out of git.
+.agents/
