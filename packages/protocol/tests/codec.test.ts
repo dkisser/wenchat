@@ -72,7 +72,7 @@ describe("codec", () => {
 	});
 
 	it("round-trips a message-ack frame", () => {
-		const original = createMessageAck(42, "ack-1");
+		const original = createMessageAck(42, null, "ack-1");
 		const decoded = decode(encode(original)) as MessageAckMessage;
 		expect(decoded).toEqual(original);
 		expect(decoded.type).toBe("message-ack");
@@ -85,6 +85,7 @@ describe("codec", () => {
 			"01234567-89ab-cdef-0123-456789abcdef",
 			bitmap,
 			39,
+			null,
 			"fca-1",
 		);
 		const decoded = decode(encode(original)) as FileChunkAckMessage;
@@ -97,7 +98,7 @@ describe("codec", () => {
 	});
 
 	it("round-trips a file-chunk-ack with an empty bitmap", () => {
-		const original = createFileChunkAck("tid", new Uint8Array(0), 0, "fca-empty");
+		const original = createFileChunkAck("tid", new Uint8Array(0), 0, null, "fca-empty");
 		const decoded = decode(encode(original)) as FileChunkAckMessage;
 		expect(decoded).toEqual(original);
 		expect(decoded.payload.bitmap.byteLength).toBe(0);

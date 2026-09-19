@@ -183,35 +183,41 @@ export function createBye(reason: ByeReason, id: string = crypto.randomUUID()): 
 }
 
 /**
- * Build a `message-ack` frame. `seq` is left as `null` here — the sender's
- * peer transport assigns the real seq in PR-3 (see
- * `docs/devops/stage-1-implementation-plan.md` §B.2).
+ * Build a `message-ack` frame. `seq` is left as `null` for receivers (ACKs
+ * travel outbound but the codec assigns their seq on the wire path); senders
+ * in PR-3 should pass the assigned seq directly to avoid a spread on the hot
+ * send path.
  */
-export function createMessageAck(ack: number, id: string = crypto.randomUUID()): MessageAckMessage {
+export function createMessageAck(
+	ack: number,
+	seq: Seq = null,
+	id: string = crypto.randomUUID(),
+): MessageAckMessage {
 	return {
 		type: "message-ack",
 		id,
 		timestamp: Date.now(),
-		seq: null,
+		seq,
 		payload: { ack },
 	};
 }
 
 /**
- * Build a `file-chunk-ack` frame. `seq` is left as `null` here — the
- * sender's peer transport assigns the real seq in PR-3.
+ * Build a `file-chunk-ack` frame. Same `seq` policy as `createMessageAck`:
+ * pass the assigned seq at construction time when known.
  */
 export function createFileChunkAck(
 	transferId: string,
 	bitmap: Uint8Array,
 	lastIndex: number,
+	seq: Seq = null,
 	id: string = crypto.randomUUID(),
 ): FileChunkAckMessage {
 	return {
 		type: "file-chunk-ack",
 		id,
 		timestamp: Date.now(),
-		seq: null,
+		seq,
 		payload: { transferId, bitmap, lastIndex },
 	};
 }
