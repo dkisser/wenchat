@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import chalk from "chalk";
 import { render } from "ink-testing-library";
 import { FILE_SUGGESTION_MAX_ROWS, FileSuggestion } from "../../src/FileSuggestion";
 import type { FileCandidate } from "../../src/fileCompletion";
@@ -23,15 +24,25 @@ describe("FileSuggestion", () => {
 	});
 
 	it("marks the selected row with inverse video, no > marker", () => {
-		const { lastFrame } = render(
-			<FileSuggestion candidates={[file("a.txt"), file("b.txt")]} selectedIndex={1} />,
-		);
-		const frame = lastFrame() ?? "";
-		expect(frame).not.toContain(">");
-		// ansi-styles inverse: \x1b[7m … \x1b[27m around the selected name.
-		const inverseStart = frame.indexOf("\u001b[7m");
-		expect(inverseStart).toBeGreaterThanOrEqual(0);
-		expect(frame.indexOf("b.txt")).toBeGreaterThan(inverseStart);
+		// Ink styles via the global chalk instance, and chalk's color detection
+		// yields level 0 on non-TTY stdout (e.g. CI) unless forced — so pin the
+		// level for this assertion instead of depending on the ambient
+		// environment.
+		const ambientLevel = chalk.level;
+		chalk.level = 1;
+		try {
+			const { lastFrame } = render(
+				<FileSuggestion candidates={[file("a.txt"), file("b.txt")]} selectedIndex={1} />,
+			);
+			const frame = lastFrame() ?? "";
+			expect(frame).not.toContain(">");
+			// ansi-styles inverse: \x1b[7m … \x1b[27m around the selected name.
+			const inverseStart = frame.indexOf("\u001b[7m");
+			expect(inverseStart).toBeGreaterThanOrEqual(0);
+			expect(frame.indexOf("b.txt")).toBeGreaterThan(inverseStart);
+		} finally {
+			chalk.level = ambientLevel;
+		}
 	});
 
 	it("caps the visible window at the max row count", () => {
