@@ -14,6 +14,7 @@ describe("index exports", () => {
 			type: "text",
 			id: "i1",
 			timestamp: 0,
+			seq: null,
 			payload: { text: "hi" },
 		};
 		expect(decode(encode(msg))).toEqual(msg);

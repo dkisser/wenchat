@@ -9,6 +9,7 @@ describe("decodeWirePacket", () => {
 			type: "text",
 			id: "m1",
 			timestamp: 42,
+			seq: null,
 			payload: { text: "hello" },
 		};
 		const packet = decodeWirePacket(encode(message));
@@ -18,7 +19,13 @@ describe("decodeWirePacket", () => {
 	});
 
 	it("accepts a string datagram (werift may surface text as string)", () => {
-		const message: Message = { type: "ping", id: "p1", timestamp: 0, payload: { nonce: "n" } };
+		const message: Message = {
+			type: "ping",
+			id: "p1",
+			timestamp: 0,
+			seq: null,
+			payload: { nonce: "n" },
+		};
 		const packet = decodeWirePacket(JSON.stringify(message));
 		expect(packet.kind).toBe("message");
 		if (packet.kind !== "message") throw new Error("unreachable");

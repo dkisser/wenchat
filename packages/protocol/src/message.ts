@@ -1,14 +1,36 @@
-export type TextMessage = {
-	type: "text";
+/**
+ * Per-peer monotonic sequence number for application messages.
+ *
+ * ADR 0003 Q1 mandates `u64`. JavaScript `number` is an IEEE-754 double,
+ * which represents integers exactly only up to `Number.MAX_SAFE_INTEGER`
+ * (~9.007e15). The codec enforces that bound at decode time (see
+ * `packages/protocol/src/codec.ts`).
+ *
+ * `null` (or, before the codec has run, absent) means "no seq" — the frame
+ * predates Stage 1 and the receiver treats it as in-order (ADR 0003 Q11).
+ */
+export type Seq = number | null;
+
+/**
+ * Common envelope fields every control-plane message carries on the wire.
+ *
+ * Stage 1 (ADR 0001, ADR 0003) added `seq`; the codec writes it as `null`
+ * for legacy frames. `id` and `timestamp` were already present pre-Stage-1.
+ */
+export type MessageEnvelope = {
 	id: string;
 	timestamp: number;
+	/** Per-peer monotonic seq (u64, capped at Number.MAX_SAFE_INTEGER). */
+	seq?: Seq;
+};
+
+export type TextMessage = MessageEnvelope & {
+	type: "text";
 	payload: { text: string };
 };
 
-export type FileStartMessage = {
+export type FileStartMessage = MessageEnvelope & {
 	type: "file-start";
-	id: string;
-	timestamp: number;
 	payload: {
 		transferId: string;
 		fileName: string;
@@ -17,10 +39,8 @@ export type FileStartMessage = {
 	};
 };
 
-export type FileEndMessage = {
+export type FileEndMessage = MessageEnvelope & {
 	type: "file-end";
-	id: string;
-	timestamp: number;
 	payload: {
 		transferId: string;
 		/** sha256 hex of the full file, computed incrementally by the sender. */
@@ -29,10 +49,8 @@ export type FileEndMessage = {
 };
 
 /** Sent by either side when a transfer dies mid-flight so the peer can clean up. */
-export type FileAbortMessage = {
+export type FileAbortMessage = MessageEnvelope & {
 	type: "file-abort";
-	id: string;
-	timestamp: number;
 	payload: {
 		transferId: string;
 		reason: string;
@@ -41,18 +59,14 @@ export type FileAbortMessage = {
 
 // Heartbeat ping — sent on a fixed cadence by each connected peer.
 // `nonce` correlates the request with the peer's pong.
-export type PingMessage = {
+export type PingMessage = MessageEnvelope & {
 	type: "ping";
-	id: string;
-	timestamp: number;
 	payload: { nonce: string };
 };
 
 // Heartbeat pong — mirrors the nonce of the triggering ping.
-export type PongMessage = {
+export type PongMessage = MessageEnvelope & {
 	type: "pong";
-	id: string;
-	timestamp: number;
 	payload: { nonce: string };
 };
 
@@ -79,11 +93,45 @@ export type ByeReason = "exit" | "disconnect";
  * type (see `DataTransport`'s decode guard) and simply falls back to the
  * network-loss path.
  */
-export type ByeMessage = {
+export type ByeMessage = MessageEnvelope & {
 	type: "bye";
-	id: string;
-	timestamp: number;
 	payload: { reason: ByeReason };
+};
+
+/**
+ * Single-value ACK for application messages (ADR 0003 Q2).
+ *
+ * `ack` is the highest contiguous seq the receiver has received from the
+ * sender. The sender uses this to advance the outbox head and stop
+ * retransmitting. Fires on whichever happens first: 200 ms idle, every 16
+ * inbound messages, or session close (ADR 0003 Q3).
+ */
+export type MessageAckMessage = MessageEnvelope & {
+	type: "message-ack";
+	payload: { ack: number };
+};
+
+/**
+ * Per-transfer chunk bitmap ACK for file transfers (ADR 0003 Q2, Q8, F.5).
+ *
+ * `bitmap` is a compact bit-per-chunk view of the chunks the receiver has
+ * for this `transferId`; bit `i` set means the receiver has chunk index `i`.
+ * `lastIndex` is the highest chunk index the sender has assigned for this
+ * transfer, so the receiver knows how many bits the bitmap covers.
+ *
+ * Chunks do NOT flow through the outbox (ADR 0003 F.5): the bitmap is the
+ * only recovery channel. The codec serializes `bitmap` as base64 so the
+ * payload stays valid JSON.
+ */
+export type FileChunkAckMessage = MessageEnvelope & {
+	type: "file-chunk-ack";
+	payload: {
+		transferId: string;
+		/** 1 bit per chunk index; LSB-first within each byte. */
+		bitmap: Uint8Array;
+		/** Highest chunk index the sender has assigned for this transfer. */
+		lastIndex: number;
+	};
 };
 
 export type Message =
@@ -93,7 +141,9 @@ export type Message =
 	| FileAbortMessage
 	| PingMessage
 	| PongMessage
-	| ByeMessage;
+	| ByeMessage
+	| MessageAckMessage
+	| FileChunkAckMessage;
 
 export type PeerInfo = {
 	id: string;
@@ -107,6 +157,7 @@ export function createPing(nonce: string, id: string = crypto.randomUUID()): Pin
 		type: "ping",
 		id,
 		timestamp: Date.now(),
+		seq: null,
 		payload: { nonce },
 	};
 }
@@ -116,6 +167,7 @@ export function createPong(nonce: string, id: string = crypto.randomUUID()): Pon
 		type: "pong",
 		id,
 		timestamp: Date.now(),
+		seq: null,
 		payload: { nonce },
 	};
 }
@@ -125,6 +177,41 @@ export function createBye(reason: ByeReason, id: string = crypto.randomUUID()): 
 		type: "bye",
 		id,
 		timestamp: Date.now(),
+		seq: null,
 		payload: { reason },
+	};
+}
+
+/**
+ * Build a `message-ack` frame. `seq` is left as `null` here — the sender's
+ * peer transport assigns the real seq in PR-3 (see
+ * `docs/devops/stage-1-implementation-plan.md` §B.2).
+ */
+export function createMessageAck(ack: number, id: string = crypto.randomUUID()): MessageAckMessage {
+	return {
+		type: "message-ack",
+		id,
+		timestamp: Date.now(),
+		seq: null,
+		payload: { ack },
+	};
+}
+
+/**
+ * Build a `file-chunk-ack` frame. `seq` is left as `null` here — the
+ * sender's peer transport assigns the real seq in PR-3.
+ */
+export function createFileChunkAck(
+	transferId: string,
+	bitmap: Uint8Array,
+	lastIndex: number,
+	id: string = crypto.randomUUID(),
+): FileChunkAckMessage {
+	return {
+		type: "file-chunk-ack",
+		id,
+		timestamp: Date.now(),
+		seq: null,
+		payload: { transferId, bitmap, lastIndex },
 	};
 }
