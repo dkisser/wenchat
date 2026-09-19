@@ -8,11 +8,7 @@ import {
 	normalizeConnectionState,
 	remoteReasonFor,
 } from "./connectionState";
-import {
-	type SendFileOptions,
-	type SendFileResult,
-	sendFile as streamFileToPeer,
-} from "./fileTransfer";
+import type { SendChannel } from "./fileTransfer";
 import { HeartbeatScheduler } from "./heartbeat";
 import { getLogger } from "./logger";
 import type { IceCandidatePayload, SdpPayload, SignalingServer } from "./signaling";
@@ -171,15 +167,33 @@ export class Session {
 	}
 
 	/**
-	 * Stream a file to the connected peer (chunked, backpressured,
-	 * sha256-verified). See `fileTransfer.ts` for the wire flow. Throws
-	 * "Data channel not ready" when no transport is attached.
+	 * PR-5 — expose the live transport as a `SendChannel` snapshot.
+	 * `PeerConnection`'s `FileSender` reads this on each send /
+	 * retransmit, so a fresh `Session` (post `swapSession`) is
+	 * transparent to the in-flight file transfers. Returns null when
+	 * no transport is attached (e.g. handshake failed).
+	 *
+	 * `bufferedAmount` and `isOpen` MUST be getters, not captured
+	 * values: a `sendFile` loop reads `bufferedAmount` after every
+	 * chunk to gate the high-water wait, and a stale snapshot value
+	 * disables the backpressure path entirely (the bug surfaces as
+	 * "sendFile resolves in 11 ms for a 4 MiB file when high-water
+	 * is supposed to pace it").
 	 */
-	async sendFile(path: string, options?: SendFileOptions): Promise<SendFileResult> {
-		if (!this.transport) {
-			throw new Error("Data channel not ready");
-		}
-		return streamFileToPeer(this.transport, path, options);
+	getSendChannel(): SendChannel | null {
+		const transport = this.transport;
+		if (!transport) return null;
+		return {
+			send: (msg) => transport.send(msg),
+			sendBinary: (frame) => transport.sendBinary(frame),
+			waitForDrain: (threshold) => transport.waitForDrain(threshold),
+			get bufferedAmount(): number {
+				return transport.bufferedAmount;
+			},
+			get isOpen(): boolean {
+				return transport.isOpen;
+			},
+		};
 	}
 
 	onMessage(callback: (message: Message) => void): () => void {

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { FileChunkFramePayload, Message, MessageAckMessage } from "@wenchat/protocol";
 import { encode as encodeMessage } from "@wenchat/protocol";
 import type { CloseReason, ConnectionEvent } from "./connectionState";
-import type { SendFileOptions, SendFileResult } from "./fileTransfer";
+import { FileSender, type SendFileOptions, type SendFileResult } from "./fileTransfer";
 import { getLogger, getWorkspaceRoot } from "./logger";
 import { MessageAckScheduler } from "./messageAck";
 import { OutboxStore } from "./outbox";
@@ -86,6 +86,11 @@ export class PeerConnection {
 	private incomingListeners: Set<(info: IncomingOfferInfo) => void> = new Set();
 	private outboxAbandonedListeners: Set<(seq: number) => void> = new Set();
 	private outboxEmptyListeners: Set<() => void> = new Set();
+	// PR-5 — chunk-level ACK sender. Persists across `swapSession` so
+	// unacked-chunk bitmaps survive a transport swap; `getChannel()`
+	// resolves to the live session's transport surface on every send.
+	private fileSender?: FileSender;
+	private transferAbandonedListeners: Set<(transferId: string) => void> = new Set();
 
 	/**
 	 * Most recent teardown intent set by {@link closeGracefully},
@@ -269,13 +274,72 @@ export class PeerConnection {
 
 	/**
 	 * Stream a file to the connected peer. Throws "Data channel not ready"
-	 * when no session is active. See `fileTransfer.ts` for the wire flow.
+	 * when no session is active. PR-5: this delegates to the per-peer
+	 * `FileSender`, which holds the unacked-chunk state, drives the
+	 * exponential-backoff retransmits, and emits `transfer-abandoned`
+	 * after 5 failed retries on any one chunk. The function returns
+	 * once `file-end` is on the wire; background retransmits continue
+	 * after this resolves.
 	 */
 	async sendFile(path: string, options?: SendFileOptions): Promise<SendFileResult> {
+		const sender = this.ensureFileSender();
+		return sender.sendFile(path, options);
+	}
+
+	/**
+	 * PR-5 — outbound dispatch for control-plane messages that do NOT
+	 * flow through the chat outbox (e.g. `FileChunkAckMessage`).
+	 * Unlike `send`, this does not allocate a seq, does not persist
+	 * to the outbox, and does not arm a retransmit timer — control
+	 * frames carry their own recovery semantics. `seq` on the
+	 * outbound message is left as whatever the caller passed (typically
+	 * `null`, which matches the existing control-frame convention in
+	 * `message-ack`).
+	 */
+	sendControlMessage(message: Message): void {
 		if (!this.session) {
 			throw new Error("Data channel not ready");
 		}
-		return this.session.sendFile(path, options);
+		this.session.send(message);
+	}
+
+	/**
+	 * Fires when a sender-side file transfer exhausts its 5-attempt
+	 * retry budget on any one chunk (mirrors `outbox-abandoned` for
+	 * chat messages). Subscribed by the CLI in PR-6 to surface a
+	 * system message; PR-5 has no other listener.
+	 */
+	onTransferAbandoned(callback: (transferId: string) => void): () => void {
+		this.transferAbandonedListeners.add(callback);
+		return () => {
+			this.transferAbandonedListeners.delete(callback);
+		};
+	}
+
+	/**
+	 * Lazy-init the per-peer `FileSender`. Mirrors
+	 * `ensureMessageAckScheduler` (PR-3): survives `swapSession`,
+	 * built once per peerId, dropped when the PeerConnection shuts
+	 * down.
+	 */
+	private ensureFileSender(): FileSender {
+		if (this.fileSender) return this.fileSender;
+		this.fileSender = new FileSender({
+			getChannel: () => this.session?.getSendChannel() ?? null,
+			onTransferAbandoned: (transferId) => this.notifyTransferAbandoned(transferId),
+		});
+		return this.fileSender;
+	}
+
+	private notifyTransferAbandoned(transferId: string): void {
+		getLogger().error({ transferId }, "file transfer abandoned");
+		for (const listener of this.transferAbandonedListeners) {
+			try {
+				listener(transferId);
+			} catch (err) {
+				getLogger().error({ err: errorText(err), transferId }, "transfer-abandoned listener threw");
+			}
+		}
 	}
 
 	onMessage(callback: (message: Message) => void): () => void {
@@ -329,6 +393,13 @@ export class PeerConnection {
 		this.closeIntent = "local-exit";
 		this.closeSession("local-exit");
 		this.signaling.stop().catch(() => {});
+		// PR-5 — the `FileSender`'s retransmit timers and open file
+		// handles must not outlive the PeerConnection; otherwise a
+		// process exit would leak fds and a subsequent test run on
+		// the same port could observe stale timers firing against a
+		// dead session.
+		void this.fileSender?.dispose();
+		this.fileSender = undefined;
 	}
 
 	/**
@@ -648,6 +719,17 @@ export class PeerConnection {
 					if (this.messageAckScheduler) {
 						void this.messageAckScheduler.noteAck(ackMsg.payload.ack);
 					}
+					return;
+				}
+				// PR-5 — `file-chunk-ack` is also control plane. The
+				// `FileSender` owns the unacked-chunk bitmap and the
+				// per-chunk retry timers; routing it through the chat
+				// `seq`-based dedup would silently drop the very first
+				// ACK on a brand-new transfer (its `seq` field is
+				// `null` by default — and even when assigned, ACK
+				// frames don't carry the sender's seq numbering).
+				if (message.type === "file-chunk-ack") {
+					this.fileSender?.noteChunkAck(message.payload);
 					return;
 				}
 				// PR-3 — basic dedup (PR-4 ReceiveWindow stand-in). For

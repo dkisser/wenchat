@@ -182,3 +182,79 @@ The scheduler is sticky to the first peerId it was built for. `PeerConnection.sw
 ### PR-3 review fixes (landed in PR-4)
 
 - **PR-3 bounded set replaced by ReceiveWindow.** The PR-3 `Set<number>` dedup (window of 64) is gone; `MessageAckScheduler.noteInbound` now delegates to a 256-entry LRU `ReceiveWindow`. The "duplicate vs new" contract is preserved; the new `"gap"` status adds the immediate-ACK trigger that ADR 0003 Q7 requires. The `recentInboundSeqs` field and the `DEDUP_WINDOW_SIZE = 64` constant are both removed from `messageAck.ts`.
+
+## File transfer reliability (PR-5)
+
+`FileSender` (PR-5, `packages/core/src/fileTransfer.ts`) is the per-peer chunk-level ACK sender. One instance lives on `PeerConnection`, created lazily on the first `sendFile` call, and reused across `swapSession` so the per-chunk unacked bitmap and retry timers survive any transport swap. Its sibling `FileReceiver` (extended in PR-5) maintains the receiver-side chunk bitmap and emits the ACK frames that drive selective retransmit.
+
+### Per-transfer bitmap model
+
+Both sides keep a per-`transferId` view of the chunks; the bitmap is the **only** recovery channel (ADR 0003 F.5 — chunks do not flow through the chat outbox):
+
+| Side | State | Updates on | Cleared on |
+|------|-------|-----------|-----------|
+| Receiver | `receivedIndices: Set<number>` + `expectedNext` cursor | every accepted chunk | never (the set is the truth) |
+| Sender | `unackedIndices: Map<number, true>` (LRU-capped at `DEFAULT_FILE_UNACKED_BITMAP_CAP = 256`) + per-chunk retry counters | every sent chunk | every inbound ACK that confirms the chunk |
+
+`expectedNext` cascades through `receivedIndices` whenever the next expected chunk is already in the set — without the cascade, a re-arrived out-of-order seq would leave the contiguous cursor lagging the bitmap.
+
+### ACK emission (ADR 0003 Q8)
+
+`FileReceiver` emits a `FileChunkAckMessage { transferId, bitmap, lastIndex }` on whichever fires first:
+
+| Trigger | When |
+|---------|------|
+| Every 32 received chunks | `chunksSinceLastAck >= FILE_CHUNK_ACK_INTERVAL (32)` |
+| Out-of-order arrival | any chunk index `> expectedNext - 1` (the PR-5 "request retransmit" path; replaces the PR-1/2/3/4 "out-of-order chunk = protocol violation" rule) |
+| `file-end` | the final ACK so the sender can fill any remaining gap |
+
+`bitmap` is bit-per-chunk, LSB-first within each byte, covering indices `0..lastIndex` where `lastIndex` is the highest chunk index the receiver has any information about (not the contiguous cursor — see `buildChunkAckBitmap`'s doc). The sender treats `lastIndex < 0` (empty bitmap) as "no info, retransmit everything".
+
+### Sender-side retransmit policy
+
+`FileSender.noteChunkAck(payload)` reconciles the receiver's bitmap against the sender's `unackedIndices`:
+
+- Bit `i` set → remove `i` from unacked, clear its retry counter + timer.
+- Bit `i` clear (and `i <= lastIndex`) → ensure `i` is in unacked.
+- After reconciliation, re-arm a retransmit timer for every still-unacked chunk. Initial delay `FILE_INITIAL_RETRANSMIT_MS = 200 ms` (faster than chat's 2 s because chunk retransmits are triggered by an ACK that already names the missing index), then `× 2` exponential backoff capped at `FILE_MAX_RETRANSMIT_MS = 30 s`. After `FILE_MAX_RETRANSMIT_ATTEMPTS = 5` failed attempts on any one chunk, the sender calls `onTransferAbandoned(transferId)` and emits a best-effort `file-abort` so the receiver can drop the partial temp file. PR-6 wires `onTransferAbandoned` to the chat log as a system message.
+
+`unackedIndices` is LRU-evicted at `DEFAULT_FILE_UNACKED_BITMAP_CAP = 256` so a multi-thousand-chunk transfer doesn't pin proportional memory; the receiver's bitmap is the authoritative source of truth, so an evicted index re-added on the next ACK lands cleanly.
+
+### Receiver-side "out-of-order = request retransmit"
+
+The PR-1/2/3/4 `failTransfer("out-of-order chunk…")` rule was reframed in PR-5:
+
+- **Before**: out-of-order arrival → `failed` event, temp file deleted, transfer aborts.
+- **After**: out-of-order arrival → record the chunk (it lands at its own offset via `addUnicted`), cascade `expectedNext` if applicable, send a `FileChunkAckMessage` so the sender knows what's missing, and keep the transfer alive.
+
+The transfer only fails when the **sender** gives up — five failed retries on any one chunk → `file-abort` → receiver's `failTransfer("aborted by peer: ...")`. This is the catastrophic-case path; the common path is "receiver asks, sender re-streams, transfer completes".
+
+### Post-`file-end` validation delay
+
+`FileReceiver.finishTransfer` schedules the final validation via `setTimeout(this.validationDelayMs)` (default 3000 ms) **only when** the post-file-end bitmap shows a gap (`expectedNext < totalChunks`). The wait runs **outside** the receiver's task queue so retransmit chunks can land during it; the deferred validation reads the (potentially fully-recovered) transfer state and either completes or fails. The happy path validates on the next event-loop tick with zero wait.
+
+The default `validationDelayMs` of 3000 ms is the worst-case budget for: sender's first retransmit (200 ms) + ACK round-trip + N retransmit writes against the receiver's queue + sha256 read of the temp file. Tests that don't exercise the recovery path pass `validationDelayMs: 0` to keep happy-path latency deterministic; the `FileReceiver` constructor option is the public knob.
+
+### Hash-from-disk at completion
+
+Out-of-order reception means a running `Hash.update` would mix chunks in receive order, never matching the sha256 the sender wrote into `file-end`. PR-5 hashes the **on-disk file** at validation time (one `readFile` per transfer; sub-millisecond on a LAN disk) and compares to the announced checksum. The "exceeds announced file size" check stays at write time (per-chunk bounds against `chunk.index * FILE_CHUNK_SIZE`) so a malicious peer can't stream unbounded data.
+
+### Chunks vs chat outbox
+
+ADR 0003 F.5: file chunks do NOT flow through the chat outbox. The chunk-level bitmap ACK is the only recovery channel. The chat outbox carries `Message` (text, file-start/-end/-abort) and `MessageAck` for application reliability; `FileSender` is a parallel structure with its own state, retry budget, and abandonment event. A sender-side crash mid-transfer is recoverable only on the next process launch with a fresh transferId; a mid-transfer channel failure on the same process is handled by `FileSender`'s retry timer firing against the next session's channel (see `swapSession` notes below).
+
+### Session swap continuity
+
+`FileSender` survives `swapSession` like `MessageAckScheduler` does. The retry timers keep ticking across transport swaps; when the next session attaches, `getChannel()` returns the new transport and pending retransmits resume. A transfer that was abandoned in `swapSession` (e.g. the user pressed `/disconnect`) is left alone — the timer fires against `null` channel, re-arms, and eventually exhausts the 5-attempt budget. This matches the chat outbox's "no state loss across reconnect" guarantee (ADR 0003 Q10).
+
+### Event API
+
+| Event | When | Where subscribed |
+|-------|------|------------------|
+| `transfer-abandoned` | After 5 failed retransmits for any chunk | `PeerConnection.onTransferAbandoned(cb)` |
+
+PR-6 wires `transfer-abandoned` to the chat log as a system message, parallel to `outbox-abandoned`.
+
+### `SendChannel` getter discipline
+
+`PeerConnection.sendFile` → `FileSender.sendFile` reaches the live transport via `Session.getSendChannel()`. The returned object's `bufferedAmount` and `isOpen` **must** be getters, not captured values: a `sendFile` loop reads `bufferedAmount` after every chunk to gate the high-water wait, and a stale snapshot value disables the backpressure path (the bug surfaces as "sendFile resolves in 11 ms for a 4 MiB file when high-water is supposed to pace it"). The getter pattern in `Session.getSendChannel` is the canonical reference; clone it for any future code that needs a `SendChannel`.
