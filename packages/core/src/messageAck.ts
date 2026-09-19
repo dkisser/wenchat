@@ -2,17 +2,21 @@ import type { Message, MessageAckMessage } from "@wenchat/protocol";
 import { createMessageAck } from "@wenchat/protocol";
 import { getLogger } from "./logger";
 import type { OutboxStore } from "./outbox";
+import { ReceiveWindow } from "./receiveWindow";
 
-// PR-3 — MessageAckScheduler (ADR 0003 Q3, Q4, Q10).
+// PR-3 + PR-4 — MessageAckScheduler (ADR 0003 Q3, Q4, Q7, Q10).
 //
 // One scheduler per `PeerConnection`. Two roles that share state:
 //
 //  * Sender — allocates a monotonic seq to every outbound application
 //    message, persists it via `OutboxStore.append`, schedules a
 //    per-message retransmit timer, and clears the timer on inbound ACK.
-//  * Receiver — tracks the highest seq received from the peer, emits a
-//    `message-ack` frame on whichever hits first: 200 ms idle, every 16
-//    inbound messages, or session close (ADR 0003 Q3).
+//  * Receiver — runs every inbound `seq` through a 256-entry LRU
+//    `ReceiveWindow` (PR-4, Q7): the window dedups, emits an
+//    immediate ACK when a gap is detected, and reports the highest
+//    contiguous seq received. ACKs are also emitted on whichever hits
+//    first of: 200 ms idle, every 16 inbound messages, or session
+//    close (Q3).
 //
 // The scheduler is intentionally IO-free in its hot path. The only async
 // work is the outbox `markAcked` calls (fire-and-forget — a failed fsync
@@ -34,10 +38,10 @@ const MAX_RETRANSMIT_ATTEMPTS = 5;
 /** ADR 0003 Q4 — backoff factor. */
 const RETRANSMIT_BACKOFF_FACTOR = 2;
 
-/** PR-3 stand-in for PR-4's ReceiveWindow (ADR 0003 Q7). 64 fits a small
- *  burst of duplicates without needing an LRU; the LRU is the only thing
- *  PR-4 actually replaces here, the eviction policy is the same. */
-const DEDUP_WINDOW_SIZE = 64;
+/** ADR 0003 Q7 — receive-window cap. Tests may pass a smaller value via
+ *  `MessageAckSchedulerOptions.dedupWindowSize` to keep eviction cases
+ *  fast. */
+const DEFAULT_DEDUP_WINDOW_SIZE = 256;
 
 function errorText(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
@@ -57,6 +61,16 @@ export type MessageAckSchedulerOptions = {
 	/** Fires exactly once per outbox-empty transition (see note in
 	 *  `noteAck`). */
 	onOutboxEmpty: () => void;
+	/** PR-4 — provide an explicit `ReceiveWindow` to use as the
+	 *  receiver-side dedup + gap-detector. Optional: when omitted, a
+	 *  fresh `ReceiveWindow` is constructed with `dedupWindowSize`
+	 *  (default 256, ADR 0003 Q7). Callers that want to share or
+	 *  inspect the window (none today) pass it explicitly. */
+	receiveWindow?: ReceiveWindow;
+	/** PR-4 — receive-window cap. Used only when `receiveWindow` is
+	 *  omitted; tests pass a smaller value to keep eviction cases
+	 *  fast. Default: 256. */
+	dedupWindowSize?: number;
 	/** Override the cadence / backoff numbers for tests. */
 	idleAckMs?: number;
 	messagesPerAck?: number;
@@ -105,12 +119,13 @@ export class MessageAckScheduler {
 	private outboxNonEmpty = false;
 
 	// Receiver state.
-	private inboundHighestContiguous = 0;
+	// PR-4 — the receive window owns dedup, gap detection, and the
+	// highestContiguous counter. The scheduler's only receiver-side
+	// concerns left are the ACK cadence (idle timer + every-N counter)
+	// and the session-close flush.
+	private readonly receiveWindow: ReceiveWindow;
 	private inboundCountSinceLastAck = 0;
 	private idleAckTimer: ReturnType<typeof setTimeout> | null = null;
-	// Bounded dedup set — PR-3 stand-in for the LRU PR-4 will add.
-	// Insertion order is the eviction order; `Set` preserves it natively.
-	private readonly recentInboundSeqs = new Set<number>();
 
 	private closed = false;
 
@@ -120,6 +135,9 @@ export class MessageAckScheduler {
 		this.sendMessage = options.sendMessage;
 		this.onOutboxAbandoned = options.onOutboxAbandoned;
 		this.onOutboxEmpty = options.onOutboxEmpty;
+		this.receiveWindow =
+			options.receiveWindow ??
+			new ReceiveWindow(options.dedupWindowSize ?? DEFAULT_DEDUP_WINDOW_SIZE);
 		this.idleAckMs = options.idleAckMs ?? IDLE_ACK_MS;
 		this.messagesPerAck = options.messagesPerAck ?? MESSAGES_PER_ACK;
 		this.initialRetransmitMs = options.initialRetransmitMs ?? INITIAL_RETRANSMIT_MS;
@@ -221,33 +239,37 @@ export class MessageAckScheduler {
 	}
 
 	/**
-	 * Receiver-side: record one inbound seq. Returns `"new"` if the seq
-	 * was not in the recent dedup window (caller should forward it to
-	 * user listeners), `"duplicate"` if it was (caller should drop
-	 * silently — the basic dedup is PR-3's stand-in for the LRU
-	 * ReceiveWindow PR-4 introduces; ADR 0003 Q7).
+	 * Receiver-side: record one inbound seq. Returns the disposition:
 	 *
-	 * PR-3 does not implement proper gap modeling — the receiver's
-	 * `highestContiguous` advances to the max seq seen, and the ACK
-	 * value is that max. SCTP ordering within a session makes this
-	 * observationally correct; cross-session gaps fall out as
-	 * "transient contiguity after a fresh start", which PR-4 will
-	 * model properly.
+	 *   * `"new"`       — first sighting within the window; caller
+	 *                     forwards the message to user listeners.
+	 *   * `"duplicate"` — already in the window; caller drops silently.
+	 *   * `"gap"`       — `seq > highestContiguous + 1`; caller fires
+	 *                     an immediate `message-ack` so the sender's
+	 *                     retransmit timer can fill the hole. The
+	 *                     scheduler also flushes an ACK itself here
+	 *                     (the "gap detected → immediate ACK" path
+	 *                     from ADR 0003 Q7 / implementation plan §B.2).
+	 *
+	 * Implementation note: the `ReceiveWindow` is the source of truth
+	 * for `highestContiguous` (PR-4). This method is responsible only
+	 * for the ACK-cadence bookkeeping.
 	 */
-	noteInbound(seq: number): "new" | "duplicate" {
-		if (this.recentInboundSeqs.has(seq)) {
+	noteInbound(seq: number): "new" | "duplicate" | "gap" {
+		const result = this.receiveWindow.accept(seq);
+		if (result.status === "duplicate") {
 			return "duplicate";
 		}
-		this.recentInboundSeqs.add(seq);
-		if (this.recentInboundSeqs.size > DEDUP_WINDOW_SIZE) {
-			const oldest = this.recentInboundSeqs.values().next().value;
-			if (oldest !== undefined) {
-				this.recentInboundSeqs.delete(oldest);
-			}
+		if (result.status === "gap") {
+			// Gap detected → flush an immediate ACK. The sender's
+			// existing PR-3 retransmit timer will cover the hole.
+			// `flushAck` is a no-op when there's nothing new to
+			// report (`inboundCountSinceLastAck === 0`) and will not
+			// double-emit in that case.
+			this.flushAck();
+			return "gap";
 		}
-		if (seq > this.inboundHighestContiguous) {
-			this.inboundHighestContiguous = seq;
-		}
+		// "new" — first sighting within the window.
 		this.inboundCountSinceLastAck += 1;
 		if (this.inboundCountSinceLastAck >= this.messagesPerAck) {
 			this.flushAck();
@@ -259,17 +281,19 @@ export class MessageAckScheduler {
 
 	/**
 	 * Receiver-side: dedup gate. Exposed for callers that want the
-	 * dedup check without involving the ACK cadence (PR-3's transport
-	 * integration uses `noteInbound`, which is the combined API).
+	 * dedup check without involving the ACK cadence. A `gap` result
+	 * is NOT a duplicate — the seq is in fact new (we just saw a
+	 * hole), so `dedupInbound` only returns true when the seq is
+	 * already in the LRU.
 	 */
 	dedupInbound(seq: number): boolean {
 		return this.noteInbound(seq) === "duplicate";
 	}
 
 	/**
-	 * Receiver-side: emit an ACK right now. Used for the "gap detected,
-	 * immediately flush ACK" path (PR-4 triggers this; PR-3 exposes the
-	 * method so the integration is testable).
+	 * Receiver-side: emit an ACK right now. Used by the "gap detected,
+	 * immediately flush ACK" path (`noteInbound` calls this on a `"gap"`
+	 * status) and by `closeSession` for the final-on-teardown emit.
 	 *
 	 * Idempotent in the sense that a count-already-zero call is a
 	 * no-op — the existing ACK (if any) is the latest one and we don't
@@ -281,10 +305,10 @@ export class MessageAckScheduler {
 		if (this.inboundCountSinceLastAck === 0) return;
 		this.inboundCountSinceLastAck = 0;
 		try {
-			this.sendAck(createMessageAck(this.inboundHighestContiguous));
+			this.sendAck(createMessageAck(this.receiveWindow.getHighestContiguous()));
 		} catch (err) {
 			getLogger().warn(
-				{ err: errorText(err), ack: this.inboundHighestContiguous },
+				{ err: errorText(err), ack: this.receiveWindow.getHighestContiguous() },
 				"sendAck threw",
 			);
 		}
@@ -295,6 +319,11 @@ export class MessageAckScheduler {
 	 * peer has the latest progress recorded, then stop scheduling. After
 	 * this call the scheduler is dormant: no more idle timers, no more
 	 * retransmits, no more outbound ACKs.
+	 *
+	 * PR-4 — also clear the receive window. A subsequent session
+	 * (or the same session after a reconnect to a different peer) must
+	 * NOT inherit stale dedup state; the LRU would otherwise mis-mark
+	 * fresh inbound seqs as duplicates.
 	 */
 	closeSession(): void {
 		if (this.closed) return;
@@ -302,11 +331,13 @@ export class MessageAckScheduler {
 		this.closed = true;
 		this.clearIdleAck();
 		this.clearAllRetransmits();
+		this.receiveWindow.clear();
 	}
 
-	/** Receiver-side: read-only view for tests and the CLI integration. */
+	/** Receiver-side: read-only view for tests and the CLI integration.
+	 *  Delegates to the `ReceiveWindow` (PR-4). */
 	getInboundHighestContiguous(): number {
-		return this.inboundHighestContiguous;
+		return this.receiveWindow.getHighestContiguous();
 	}
 
 	/**

@@ -6,5 +6,6 @@ export * from "./messageAck";
 export * from "./network";
 export * from "./outbox";
 export * from "./peer";
+export * from "./receiveWindow";
 export * from "./signaling";
 export * from "./transport";

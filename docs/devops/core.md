@@ -109,12 +109,12 @@ The outbox shipped with two review-driven edges that the subsequent PR addressed
 
 ## MessageAckScheduler
 
-`MessageAckScheduler` (PR-3, `packages/core/src/messageAck.ts`) is the per-peer application-layer reliability state machine. One instance lives on `PeerConnection`, created lazily on the first `connect()` / `acceptOffer()` for a given peer, and reused across `swapSession` so the seq counter, retransmit timers, and inbound contiguity state survive any transport swap (ADR 0003 Q10).
+`MessageAckScheduler` (PR-3 + PR-4, `packages/core/src/messageAck.ts`) is the per-peer application-layer reliability state machine. One instance lives on `PeerConnection`, created lazily on the first `connect()` / `acceptOffer()` for a given peer, and reused across `swapSession` so the seq counter, retransmit timers, and inbound contiguity state survive any transport swap (ADR 0003 Q10).
 
 ### Two roles share state
 
 - **Sender:** `allocateSeq()` returns the next monotonic seq (loaded from `outbox.getHead()` on construction via `initFromOutbox`); `peer.ts::send()` appends the encoded payload to the outbox, registers a per-message retransmit timer with `scheduleRetransmit(seq, encoded)`, and dispatches the message on the wire.
-- **Receiver:** `noteInbound(seq)` updates the highest contiguous seq, increments the "since last ACK" counter, and emits an ACK per the trigger schedule. Inbound `message-ack` frames route to `noteAck(ack)` which clears matching retransmit timers and tombstone-writes via `outbox.markAcked`.
+- **Receiver:** `noteInbound(seq)` runs every inbound seq through the receive window (PR-4), increments the "since last ACK" counter, and emits an ACK per the trigger schedule. Inbound `message-ack` frames route to `noteAck(ack)` which clears matching retransmit timers and tombstone-writes via `outbox.markAcked`.
 
 ### ACK trigger (ADR 0003 Q3)
 
@@ -125,8 +125,9 @@ Whichever happens first:
 | Idle timer           | 200 ms after the last `noteInbound`                    |
 | Every-16 messages    | When `inboundCountSinceLastAck >= 16`                  |
 | Session close        | `closeSession()` calls `flushAck()` before going dark  |
+| Gap detected         | `noteInbound` returns `"gap"` → immediate `flushAck()` |
 
-`flushAck()` is also exposed for the gap-detection path (PR-4 will wire it from the receive window).
+`flushAck()` is also exposed as a public method so the gap-detection path (PR-4) can call it without involving the cadence timers.
 
 ### Retransmit policy (ADR 0003 Q4)
 
@@ -145,10 +146,39 @@ Whichever happens first:
 
 Both are emitted through `PeerConnection`'s listener sets so the CLI can subscribe without reaching into the scheduler directly.
 
-### Basic dedup (PR-3 stand-in for PR-4 ReceiveWindow)
+### Receive window (PR-4 — ADR 0003 Q7)
 
-`noteInbound` keeps a bounded `Set<number>` of recently-seen seqs (window = 64). The first sighting of a seq advances contiguity and triggers ACK logic; subsequent sightings within the window return `"duplicate"` so the caller (peer.ts's session forwarder) can drop them silently. The LRU eviction is by `Set` insertion order — PR-4 replaces this with the 256-entry LRU `ReceiveWindow` from ADR 0003 Q7; the eviction policy and the "duplicate vs new" contract are the only things that change.
+`ReceiveWindow` (new in PR-4, `packages/core/src/receiveWindow.ts`) is the receiver-side LRU dedup + gap detector. Default cap = 256 (ADR 0003 Q7); `MessageAckScheduler` constructs one per peer and feeds every inbound seq through it.
+
+#### API
+
+```ts
+accept(seq: number): { status: "new" | "duplicate" | "gap", gapFrom?, gapTo? }
+getHighestContiguous(): number
+size(): number
+clear(): void
+```
+
+- `"new"` — first sighting within the window; the caller forwards the message to user listeners. `highestContiguous` advances only when `seq === highestContiguous + 1` (with the cascade filling any in-window gap).
+- `"duplicate"` — already in the window; the caller drops silently.
+- `"gap"` — `seq > highestContiguous + 1`; the caller fires an immediate `message-ack` so the sender's retransmit timer can fill the hole. `gapFrom = highestContiguous + 1`, `gapTo = seq - 1`. `highestContiguous` does NOT advance on a gap — we are still missing everything in `gapFrom..gapTo`.
+
+#### Why LRU at 256?
+
+256 is "roughly a full backscroll of duplicates before eviction starts losing dedup". For a chat session the worst case is bursty duplication after reconnect. On eviction the next inbound seq triggers a gap → immediate ACK → retransmit covers the gap. The loss is recoverable, not silent.
+
+#### Cascade fill
+
+When `accept(seq)` advances `highestContiguous` by one step (`seq === highestContiguous + 1`), the implementation keeps advancing as long as `highestContiguous + 1` is already in the window. Without the cascade, a re-arrived out-of-order seq would leave the ACK value lagging behind what we actually hold — the sender would retransmit a seq we already have. With the cascade, every `flushAck()` reflects reality after the most recent `accept()`.
+
+#### Cross-`swapSession` continuity
+
+`MessageAckScheduler.closeSession()` calls `receiveWindow.clear()` — a fresh session starts with an empty window rather than inheriting stale dedup state. The scheduler's `seq` counter itself survives `swapSession` (per ADR 0003 Q10); the receiver-side contiguity is treated as a per-session invariant because the wire's notion of "fresh start" matches the window's. A reconnect to a different `peerId` (which constructs a new `MessageAckScheduler` and therefore a new `ReceiveWindow`) obviously resets both sides.
 
 ### Cross-`swapSession` continuity
 
-The scheduler is sticky to the first peerId it was built for. `PeerConnection.swapSession` does NOT touch it — only the `sendAck` / `sendMessage` callbacks (which dispatch through `PeerConnection.session` — the new one) point at the fresh transport. This is what guarantees `seq` continuity across a network drop: a post-swap `allocateSeq()` returns `lastKnown + 1`, never resets to 1.
+The scheduler is sticky to the first peerId it was built for. `PeerConnection.swapSession` does NOT touch it — only the `sendAck` / `sendMessage` callbacks (which dispatch through `PeerConnection.session` — the new one) point at the fresh transport. This is what guarantees `seq` continuity across a network drop: a post-swap `allocateSeq()` returns `lastKnown + 1`, never resets to 1. The receive window's state similarly survives the swap; `closeSession` is the only thing that resets it (see above).
+
+### PR-3 review fixes (landed in PR-4)
+
+- **PR-3 bounded set replaced by ReceiveWindow.** The PR-3 `Set<number>` dedup (window of 64) is gone; `MessageAckScheduler.noteInbound` now delegates to a 256-entry LRU `ReceiveWindow`. The "duplicate vs new" contract is preserved; the new `"gap"` status adds the immediate-ACK trigger that ADR 0003 Q7 requires. The `recentInboundSeqs` field and the `DEDUP_WINDOW_SIZE = 64` constant are both removed from `messageAck.ts`.

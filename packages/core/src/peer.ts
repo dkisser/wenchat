@@ -7,6 +7,7 @@ import type { SendFileOptions, SendFileResult } from "./fileTransfer";
 import { getLogger, getWorkspaceRoot } from "./logger";
 import { MessageAckScheduler } from "./messageAck";
 import { OutboxStore } from "./outbox";
+import { ReceiveWindow } from "./receiveWindow";
 import { Session } from "./session";
 import { type IceCandidatePayload, type SdpPayload, SignalingServer } from "./signaling";
 
@@ -544,8 +545,15 @@ export class PeerConnection {
 		}
 		const outboxPath = join(getWorkspaceRoot(), "outbox", `${peerId}.jsonl`);
 		this.outbox = new OutboxStore(outboxPath);
+		// PR-4 — construct the receive window explicitly here (default
+		// cap = 256, ADR 0003 Q7) and hand it to the scheduler so its
+		// lifetime matches the scheduler's: same `PeerConnection`, same
+		// peerId, same `swapSession` continuity. Tests can pass a smaller
+		// cap via `MessageAckSchedulerOptions.dedupWindowSize` instead.
+		const receiveWindow = new ReceiveWindow();
 		this.messageAckScheduler = new MessageAckScheduler({
 			outbox: this.outbox,
+			receiveWindow,
 			sendAck: (ack) => this.dispatchOutbound(ack),
 			sendMessage: (msg) => this.dispatchOutbound(msg),
 			onOutboxAbandoned: (seq) => this.notifyOutboxAbandoned(seq),

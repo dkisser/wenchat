@@ -6,7 +6,12 @@ import type { Message, MessageAckMessage } from "@wenchat/protocol";
 import { MessageAckScheduler } from "../../src/messageAck";
 import { OutboxStore } from "../../src/outbox";
 
-// Tests for the sender/receiver ACK scheduler (PR-3, ADR 0003 Q3/Q4/Q10).
+// Tests for the sender/receiver ACK scheduler (PR-3 + PR-4, ADR 0003
+// Q3/Q4/Q7/Q10). PR-4 swaps the PR-3 bounded `Set<number>` dedup for
+// the 256-entry LRU `ReceiveWindow` and adds the "gap → immediate ACK"
+// branch on `noteInbound`; the rest of the scheduler (sender-side seq
+// allocation, retransmit timer, outbox wiring, every-16/idle ACK
+// cadence) is unchanged.
 //
 // Two "harness" helpers drive the scheduler with fake transport and fake
 // listeners so the timer behaviour and the state-machine transitions are
@@ -44,6 +49,7 @@ function makeHarness(overrides?: {
 	initialRetransmitMs?: number;
 	maxRetransmitMs?: number;
 	maxRetransmitAttempts?: number;
+	dedupWindowSize?: number;
 }): Harness {
 	const sentAcks: MessageAckMessage[] = [];
 	const sentMessages: Message[] = [];
@@ -63,6 +69,7 @@ function makeHarness(overrides?: {
 		initialRetransmitMs: overrides?.initialRetransmitMs,
 		maxRetransmitMs: overrides?.maxRetransmitMs,
 		maxRetransmitAttempts: overrides?.maxRetransmitAttempts,
+		dedupWindowSize: overrides?.dedupWindowSize,
 	});
 	return {
 		scheduler,
@@ -200,27 +207,40 @@ describe("MessageAckScheduler — receiver-side ACK emission (ADR 0003 Q3)", () 
 
 	it("closeSession emits a final ACK and stops scheduling timers", async () => {
 		const h = makeHarness({ idleAckMs: 30 });
-		h.scheduler.noteInbound(5);
+		h.scheduler.noteInbound(1); // "new" → triggers idle/count ACK cadence
 		h.scheduler.closeSession();
 		expect(h.sentAcks).toHaveLength(1);
-		expect(h.sentAcks[0].payload.ack).toBe(5);
+		expect(h.sentAcks[0].payload.ack).toBe(1);
 		// The idle timer is dead — waiting past the deadline must NOT emit.
 		await sleep(60);
 		expect(h.sentAcks).toHaveLength(1);
 	});
 
-	it("the inboundHighestContiguous advances to the max seq seen (no gap modeling in PR-3)", () => {
+	it("inboundHighestContiguous advances through contiguous seqs and stops at the first gap", () => {
+		// PR-4 — the receive window is the source of truth for
+		// highestContiguous. accept(5) is a gap from 3 to 4, so
+		// highestContiguous stays at 2 (the last contiguous). The
+		// ACK value reflects that — PR-3 used to emit max(seen)
+		// which would have led to "fraud gap" false positives after
+		// reconnect.
 		const h = makeHarness();
 		h.scheduler.noteInbound(1);
 		h.scheduler.noteInbound(2);
-		h.scheduler.noteInbound(5); // gap by PR-4 standards; PR-3 just tracks max
+		h.scheduler.noteInbound(5); // gap; highest stays at 2
+		expect(h.scheduler.getInboundHighestContiguous()).toBe(2);
+		// Accepting 3 fills the gap and cascades through 4 (not in
+		// window) and 5 (in window via the prior gap-detect insert)
+		// — wait, 4 isn't in window, so cascade stops at 3 then 5 is
+		// not contiguous from 3. Then accepting 4 fills 4, and the
+		// cascade pushes through 4 → 5. highestContiguous = 5.
+		h.scheduler.noteInbound(3);
+		expect(h.scheduler.getInboundHighestContiguous()).toBe(3);
+		h.scheduler.noteInbound(4);
 		expect(h.scheduler.getInboundHighestContiguous()).toBe(5);
-		h.scheduler.flushAck();
-		expect(h.sentAcks[0].payload.ack).toBe(5);
 	});
 });
 
-describe("MessageAckScheduler — basic dedup (PR-3 stand-in for ReceiveWindow)", () => {
+describe("MessageAckScheduler — dedup via ReceiveWindow (PR-4)", () => {
 	it("dedupInbound returns false for the first sighting and true for repeats", () => {
 		const h = makeHarness();
 		expect(h.scheduler.dedupInbound(1)).toBe(false);
@@ -230,7 +250,9 @@ describe("MessageAckScheduler — basic dedup (PR-3 stand-in for ReceiveWindow)"
 	});
 
 	it("evicts the oldest seq once the window of 64 is full", () => {
-		const h = makeHarness();
+		// PR-4 — the dedup window now lives in `ReceiveWindow`, default
+		// cap 256. Override to 64 to keep this case fast.
+		const h = makeHarness({ dedupWindowSize: 64 });
 		for (let i = 1; i <= 64; i++) {
 			expect(h.scheduler.dedupInbound(i)).toBe(false);
 		}
@@ -461,8 +483,12 @@ describe("MessageAckScheduler — inbound ACK handling (ADR 0003 Q2)", () => {
 
 describe("MessageAckScheduler — cross-cutting", () => {
 	it("the outbound ACK frame is a valid MessageAckMessage (codec round-trip)", () => {
+		// PR-4 — noteInbound(1) is "new" on a fresh window (highestContiguous
+		// goes 0 → 1); noteInbound(7) would be a gap (1..6) and would not
+		// produce an ACK under PR-4 semantics. Use a contiguous prefix.
 		const h = makeHarness();
-		h.scheduler.noteInbound(7);
+		h.scheduler.noteInbound(1);
+		h.scheduler.noteInbound(2);
 		h.scheduler.flushAck();
 		const ack = h.sentAcks[0];
 		// Round-trip via the codec to make sure the scheduler's output is
@@ -472,7 +498,7 @@ describe("MessageAckScheduler — cross-cutting", () => {
 		const decoded = decode(bytes);
 		expect(decoded.type).toBe("message-ack");
 		if (decoded.type === "message-ack") {
-			expect(decoded.payload.ack).toBe(7);
+			expect(decoded.payload.ack).toBe(2);
 		}
 	});
 
