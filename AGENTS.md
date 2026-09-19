@@ -85,3 +85,5 @@ Feature-level implementation notes, kept out of this file on purpose — consult
 - `docs/adr/` — accepted and proposed architectural decisions. Cross-reference the relevant ADR when touching code that implements or contradicts one.
   - `0001-application-layer-message-reliability.md` — Stage 1 roadmap (per-peer `seq` + ACK + persistent outbox + chunk-level ACK for file transfer; transport stays `werift` WebRTC DataChannel).
   - `0002-cross-network-transport-evaluation.md` — Stage 2 placeholder (QUIC evaluation, triggered by cross-network reach requirements).
+  - `0003-stage-1-wire-format.md` — Stage 1 implementation contract (locks all open questions from the plan: seq width, ACK shape/cadence, outbox format, receive window size, chunk vs outbox boundary).
+- `docs/devops/stage-1-implementation-plan.md` — work breakdown for Stage 1 (6-PR additive stack). Read alongside ADR 0001 + 0003 when starting any PR in that stack.
