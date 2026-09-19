@@ -56,3 +56,45 @@ try {
 The helper is idempotent (guarded by `Symbol.for('wenchat.peer-test.udp-suppressed')`) so nested calls are safe.
 
 If a future test needs to suppress a different error family on a different emitter, copy the pattern — do not try `process.on('uncaughtException', …)` again; the trap is identical.
+
+## Outbox on disk
+
+`OutboxStore` (PR-2, `packages/core/src/outbox.ts`) is the per-peer persistent queue for application-message reliability (ADR 0001 + ADR 0003). One store per remote peer; the caller (`peer.ts` in PR-3) constructs the path, the store itself knows nothing about `localId` or `~/.wenchat`. The convention is `<workspaceRoot>/outbox/<peerId>.jsonl`.
+
+### File format
+
+JSONL, one entry per line. Three entry kinds (Zod discriminated union on `kind`):
+
+| `kind`  | Shape                                   | Written by                | Meaning                                                                            |
+| ------- | --------------------------------------- | ------------------------- | ---------------------------------------------------------------------------------- |
+| `head`  | `{ kind: "head", head: N }`             | PR-3's sender scheduler   | Fast-recovery high-water seq (ADR 0003 Q10). PR-2 never writes this; reading is supported so PR-3 can add the writer without changing readers. |
+| `msg`   | `{ kind: "msg", seq: N, encoded: "…" }` | PR-3's sender scheduler   | One outbound application message, frozen as the encoded wire payload. The sender stores what it SENT, not what it meant, so a retransmit reproduces the exact bytes. |
+| `ack`   | `{ kind: "ack", seq: N }`               | PR-3 on inbound `message-ack` | Soft tombstone (ADR 0003 Q6) — receiver has confirmed `seq` N, and per Q2 the ACK value is "highest contiguous", so `ack=N` implicitly covers `1..N`. |
+
+### Crash recovery
+
+The file is read line-by-line on every `unackedFrom` / `getHead` call. Any line that fails Zod validation (partial write from a mid-`fsync` kill, garbage bytes, anything else) is **skipped** with a `pino warn` — the store never throws on corrupt input. The worst case is "the last un-flight entry got lost", which the retransmit loop surfaces as `outbox-abandoned` (PR-3) rather than corrupting the whole queue.
+
+`OutboxStore.append` rejects any payload containing a literal `"\n"` (would corrupt JSONL) — the validation runs BEFORE `fsync`, so a rejected write leaves nothing on disk.
+
+### Fsync policy
+
+**Every** append and `markAcked` does one `write` + one `fsync` before the promise resolves. This is per ADR 0003 F.1: the alternative (in-memory bounded queue + background flusher) opens a recovery window of unflushed entries that a hard kill would drop. Chat traffic is human-limited, so the per-message cost is acceptable; bulk file transfer goes through `fileTransfer.ts` and does NOT touch the outbox (ADR 0003 F.5) — the bitmap ACK is the recovery channel for chunks.
+
+A future PR may add a bounded in-memory queue (suggested cap: 16 unflushed) if real workloads show the per-message `fsync` is a bottleneck. The current contract is "one `fsync` per `append`"; do not change it without an ADR amendment.
+
+### Compaction
+
+`OutboxStore.compact()` rewrites the file via a temp file + `rename` (atomic on POSIX), dropping every `msg` and `ack` entry whose `seq <= head`. The compactor is exposed as a public method so PR-3 can call it from its background scheduler. ADR 0003 Q6 fixes the trigger at "outbox > 1 MiB AND head < tail − 1 KiB"; PR-3 owns the policy. Compacting when `head === 0` is a no-op (nothing to drop).
+
+### Concurrent writers
+
+Every mutator funnels through an internal promise queue. Two `await store.append(...)` calls racing each other serialize through that chain, so on-disk order matches the await order. PR-3's sender relies on this to guarantee "outbox order = wire order".
+
+### Path discipline
+
+`OutboxStore` does NOT inspect `~/.wenchat` or derive paths from `localId` — it stores whatever the caller passes. Tests use `mkdtemp(os.tmpdir(), …)` to stay out of `~/.wenchat`. The constructor does not touch the filesystem; the first `append` lazily `mkdir -p`s the parent directory.
+
+### `close()` semantics
+
+Idempotent. Sets an internal `closed` flag; every subsequent mutator (`append`, `markAcked`, `unackedFrom`, `getHead`, `compact`) rejects with `OutboxStore: operation on a closed store`. The reopen path is "construct a fresh `OutboxStore(path)` and read the file" — there is no `open()` method.

@@ -25,7 +25,8 @@
 		"@wenchat/protocol": "workspace:*",
 		"bonjour-service": "^1.2.1",
 		"pino": "^9.3.0",
-		"werift": "^0.21.0"
+		"werift": "^0.21.0",
+		"zod": "4.6.5"
 	},
 	"devDependencies": {
 		"@types/node": "^20.0.0",
