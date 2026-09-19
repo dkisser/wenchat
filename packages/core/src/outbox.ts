@@ -21,13 +21,11 @@ import { getLogger } from "./logger";
  * single line per process boot to recover the high-water mark without
  * scanning every tombstone. PR-3's writer is the only thing that writes
  * `head`; this PR never does.
+ *
+ * Type is `z.infer`ed from the schema (AGENTS.md "use Zod for every IO
+ * boundary" rule) — no parallel hand-written type.
  */
-export type OutboxEntry =
-	| { kind: "head"; head: number }
-	| { kind: "msg"; seq: number; encoded: string }
-	| { kind: "ack"; seq: number };
-
-const OutboxEntrySchema = z.discriminatedUnion("kind", [
+export const OutboxEntrySchema = z.discriminatedUnion("kind", [
 	z.object({ kind: z.literal("head"), head: z.int().min(0) }),
 	z.object({
 		kind: z.literal("msg"),
@@ -36,6 +34,8 @@ const OutboxEntrySchema = z.discriminatedUnion("kind", [
 	}),
 	z.object({ kind: z.literal("ack"), seq: z.int().min(0) }),
 ]);
+
+export type OutboxEntry = z.infer<typeof OutboxEntrySchema>;
 
 /**
  * Above this size the recovery path emits a `pino warn` so a runaway
