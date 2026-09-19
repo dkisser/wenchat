@@ -56,6 +56,10 @@ _Avoid_: Send queue, mailbox
 The receiver-side sliding window that deduplicates by `seq` and detects gaps. The window size bounds how far ahead of the highest contiguous `seq` a peer may send.
 _Avoid_: dedup buffer, reorder buffer
 
+**chunk-level ACK**:
+The bitmap-per-`transferId` recovery channel for file transfer, conceptually distinct from the chat-message single-value ACK above. The receiver reports which chunks of a transfer it has; the sender re-streams only the missing ones, so mid-transfer network drops don't restart the whole file.
+_Avoid_: file ack, transfer ack
+
 ## Cross-Network Trust (Stage 2)
 
 **TOFU**:

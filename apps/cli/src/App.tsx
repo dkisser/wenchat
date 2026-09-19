@@ -144,6 +144,27 @@ export function App({ displayName, signalingPort, signalingHost, initialMessages
 		peersRef.current = peers;
 	}, [peers]);
 
+	// PR-6 — surface Stage 1 reliability give-up events (ADR 0003 Q4 +
+	// PR-5's file-transfer retry budget) as chat-log system messages.
+	// `onOutboxAbandoned` fires when a chat message exhausts its 5-attempt
+	// exponential-backoff retransmit budget; `onTransferAbandoned` is the
+	// parallel event for file chunks. The peer raises them both; we just
+	// translate into the existing `appendSystemMessage` path so the chat
+	// log stays the single observability surface (no new TUI wiring per
+	// ADR 0003 Q12).
+	useEffect(() => {
+		const unsubAbandoned = peerConnection.onOutboxAbandoned((seq) => {
+			appendSystemMessage(`Failed to deliver message (seq=${seq}) after retries`);
+		});
+		const unsubTransferAbandoned = peerConnection.onTransferAbandoned((transferId) => {
+			appendSystemMessage(`File transfer abandoned (id=${transferId})`);
+		});
+		return () => {
+			unsubAbandoned();
+			unsubTransferAbandoned();
+		};
+	}, [peerConnection, appendSystemMessage]);
+
 	// Ctrl+T toggles mouse reporting at the terminal level. While tracking
 	// is on the host terminal swallows drag-select, so users flip it off
 	// (and back on) to copy text out of the chat log. Ctrl+T was picked

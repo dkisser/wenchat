@@ -7,6 +7,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Stage 1 application-layer message reliability** (ADR 0001, ADR 0003).
+  Per-peer monotonic `seq` + ACK + persistent JSONL outbox + LRU 256
+  receive window + gap detection + chunk-level file transfer ACK +
+  selective retransmit. 5-attempt exponential-backoff give-up emits
+  `outbox-abandoned` / `transfer-abandoned`; the CLI surfaces both as
+  chat-log system messages.
+
+### Changed
+
+- **All IO boundaries now validate via Zod schemas** (`@wenchat/protocol`
+  wire format + `@wenchat/core` JSONL outbox entries). AGENTS.md
+  codifies this as a project-wide rule.
+
+### Fixed
+
+- **`sendFile` no longer resolves prematurely.** `Session.getSendChannel`
+  was capturing the transport by value, so the `bufferedAmount`
+  backpressure in `sendFile` saw a stale value; a 4 MiB file used to
+  resolve in ~11 ms while the SCTP queue was still draining. Now uses
+  a getter so the live channel state is read on every check.
+
 ## [0.1.10] - 2026-08-28
 
 ### Added
