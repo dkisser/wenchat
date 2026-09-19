@@ -78,3 +78,10 @@ Feature-level implementation notes, kept out of this file on purpose — consult
 - `docs/devops/cli-subcommands.md` — CLI subcommand and upgrade behavior spec
 - `docs/devops/ui-rendering.md` — markdown rendering, clipboard, OSC 52, mouse invariants
 - `docs/devops/ci-release.md` — CI pipeline, release workflow, asset naming, versioning details
+
+## Domain model & decisions
+
+- `CONTEXT.md` — project glossary (PeerConnection / Session / DataChannel / Heartbeat / outbox / ACK / TOFU …). **Read first** when introducing new vocabulary or before adding a new package boundary.
+- `docs/adr/` — accepted and proposed architectural decisions. Cross-reference the relevant ADR when touching code that implements or contradicts one.
+  - `0001-application-layer-message-reliability.md` — Stage 1 roadmap (per-peer `seq` + ACK + persistent outbox + chunk-level ACK for file transfer; transport stays `werift` WebRTC DataChannel).
+  - `0002-cross-network-transport-evaluation.md` — Stage 2 placeholder (QUIC evaluation, triggered by cross-network reach requirements).
