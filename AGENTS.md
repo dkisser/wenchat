@@ -12,7 +12,7 @@ Bun workspaces (`workspaces: ["apps/*", "packages/*"]`); inter-package refs use 
 
 - `apps/cli` — `@wenchat/cli` — Ink TUI entry point
 - `packages/core` — `@wenchat/core` — WebRTC, mDNS, signaling, peer transport
-- `packages/protocol` — `@wenchat/protocol` — pure types for messages/chunks, no runtime deps
+- `packages/protocol` — `@wenchat/protocol` — pure types for messages/chunks, **plus one runtime dep (`zod`) for codec validation** — keep new deps here to a minimum; prefer types over runtime
 - `packages/ui` — `@wenchat/ui` — Ink components + helpers
 
 Package-specific gotchas — read on demand when editing those paths:

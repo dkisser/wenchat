@@ -1,4 +1,5 @@
-import type { Message, Seq } from "./message";
+import { z } from "zod";
+import type { Message } from "./message";
 
 /**
  * JSON codec for control-plane messages. File chunks never pass through here
@@ -21,11 +22,44 @@ const MESSAGE_TYPES = new Set([
 
 /**
  * Hard upper bound for a decoded seq. ADR 0003 Q1 mandates `u64`, but
- * JavaScript `number` is IEEE-754 double — anything above this loses
- * integer precision, so the codec rejects it defensively before the value
- * reaches the ACK scheduler (Stage 1 PR-3).
+ * JavaScript `number` is IEEE-754 double — `z.int()` (Zod v4) already
+ * enforces the safe-integer range, so this is belt-and-suspenders plus a
+ * self-documenting cap.
  */
 const MAX_SAFE_SEQ = Number.MAX_SAFE_INTEGER;
+
+/**
+ * Per ADR 0003 Q11: seq is optional on the wire; when present, must be a
+ * safe non-negative integer. `z.int()` is Zod v4's safe-integer-only
+ * equivalent of `z.number().int()`; `.nullish()` accepts both `null`
+ * (explicit legacy marker) and `undefined` (field absent).
+ */
+const SeqSchema = z
+	.int({ error: "seq must be an integer" })
+	.min(0, { error: "seq must be >= 0" })
+	.max(MAX_SAFE_SEQ, { error: `seq must be <= ${MAX_SAFE_SEQ}` })
+	.nullish();
+
+/**
+ * File-chunk-ack payload (ADR 0003 Q2 + Q8). `bitmap` is base64 on the wire;
+ * `z.base64()` validates alphabet + length + padding in v4.6. `transferId`
+ * stays as a plain `z.string()` — the existing tests use a non-RFC-4122
+ * hex-grouped id ("01234567-89ab-cdef-...") that would fail `z.uuid()`.
+ */
+const FileChunkAckPayloadSchema = z.object({
+	transferId: z.string({ error: "transferId must be a string" }),
+	bitmap: z.base64({ error: "bitmap must be a valid base64 string" }),
+	lastIndex: z.int().min(0, { error: "lastIndex must be >= 0" }),
+});
+
+/**
+ * Decode helper: turn a ZodError into a single-line, human-readable string
+ * suitable for an `Error` message. `z.prettifyError` is the v4-recommended
+ * helper (instance `.format()` / `.flatten()` are deprecated).
+ */
+function formatZodError(err: z.ZodError): string {
+	return z.prettifyError(err);
+}
 
 export function encode(message: Message): Uint8Array {
 	return new TextEncoder().encode(JSON.stringify(toWire(message)));
@@ -46,7 +80,10 @@ export function decode(buffer: Uint8Array): Message {
 		throw new Error(`Unknown message type: ${type}`);
 	}
 
-	validateSeq(message.seq);
+	const seqResult = SeqSchema.safeParse(message.seq);
+	if (!seqResult.success) {
+		throw new Error(`Invalid seq: ${formatZodError(seqResult.error)}`);
+	}
 
 	if (type === "file-chunk-ack") {
 		return hydrateFileChunkAck(message);
@@ -54,26 +91,7 @@ export function decode(buffer: Uint8Array): Message {
 
 	// Normalize missing seq to null (ADR 0003 Q11). Spread keeps the
 	// returned object immutable w.r.t. the JSON-parsed input.
-	const seq = (message.seq ?? null) as Seq;
-	return { ...message, seq } as Message;
-}
-
-/**
- * Narrow the `seq` field before it reaches the higher layers. Per ADR 0003
- * Q11, missing/undefined is accepted (legacy frame); anything else must be
- * a non-negative integer no greater than `Number.MAX_SAFE_INTEGER`.
- */
-function validateSeq(seq: unknown): void {
-	if (seq === null || seq === undefined) return;
-	if (typeof seq !== "number" || !Number.isFinite(seq)) {
-		throw new Error(`Invalid seq: expected non-negative integer, got ${JSON.stringify(seq)}`);
-	}
-	if (seq < 0) {
-		throw new Error(`Invalid seq: ${seq} (must be >= 0)`);
-	}
-	if (seq > MAX_SAFE_SEQ) {
-		throw new Error(`Invalid seq: ${seq} exceeds Number.MAX_SAFE_INTEGER (${MAX_SAFE_SEQ})`);
-	}
+	return { ...message, seq: seqResult.data ?? null } as Message;
 }
 
 /**
@@ -98,28 +116,19 @@ function toWire(message: Message): unknown {
 /**
  * Build a fully-typed `file-chunk-ack` from the JSON-parsed record. The
  * bitmap field arrives as a base64 string; everything else is shape-checked
- * and surfaced with a clear error if a peer sends the wrong type.
+ * by Zod and surfaced with a clear error if a peer sends the wrong type.
  */
 function hydrateFileChunkAck(message: Record<string, unknown>): Message {
-	const payload = message.payload as Record<string, unknown> | undefined;
-	if (payload === undefined || typeof payload !== "object" || payload === null) {
-		throw new Error("file-chunk-ack payload must be an object");
+	const payloadResult = FileChunkAckPayloadSchema.safeParse(message.payload);
+	if (!payloadResult.success) {
+		throw new Error(`Invalid file-chunk-ack payload: ${formatZodError(payloadResult.error)}`);
 	}
-	const { transferId, bitmap, lastIndex } = payload;
-	if (typeof transferId !== "string") {
-		throw new Error("file-chunk-ack transferId must be a string");
-	}
-	if (typeof bitmap !== "string") {
-		throw new Error("file-chunk-ack bitmap must be a base64 string");
-	}
-	if (typeof lastIndex !== "number" || !Number.isInteger(lastIndex) || lastIndex < 0) {
-		throw new Error(`file-chunk-ack lastIndex must be a non-negative integer, got ${lastIndex}`);
-	}
+	const { transferId, bitmap, lastIndex } = payloadResult.data;
 	return {
 		type: "file-chunk-ack",
 		id: message.id as string,
 		timestamp: message.timestamp as number,
-		seq: (message.seq ?? null) as Seq,
+		seq: SeqSchema.parse(message.seq) ?? null,
 		payload: {
 			transferId,
 			bitmap: base64ToUint8Array(bitmap),

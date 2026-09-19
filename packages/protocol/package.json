@@ -1,6 +1,6 @@
 {
 	"name": "@wenchat/protocol",
-	"description": "WenChat protocol — zero-dependency message types and chunk serialization for chat and file transfer",
+	"description": "WenChat protocol — message types, chunk serialization, and Zod-validated codec for chat and file transfer",
 	"keywords": ["wenchat", "protocol", "message", "serialization", "file-transfer"],
 	"license": "MIT",
 	"version": "0.1.10",
@@ -24,5 +24,8 @@
 	"homepage": "https://github.com/dkisser/wenchat#readme",
 	"bugs": {
 		"url": "https://github.com/dkisser/wenchat/issues"
+	},
+	"dependencies": {
+		"zod": "4.6.5"
 	}
 }

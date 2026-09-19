@@ -20,7 +20,7 @@
     },
     "apps/cli": {
       "name": "@wenchat/cli",
-      "version": "0.1.4",
+      "version": "0.1.10",
       "bin": {
         "wenchat": "./dist/main.js",
       },
@@ -43,7 +43,7 @@
     },
     "packages/core": {
       "name": "@wenchat/core",
-      "version": "0.1.4",
+      "version": "0.1.10",
       "dependencies": {
         "@wenchat/protocol": "workspace:*",
         "bonjour-service": "^1.2.1",
@@ -57,14 +57,17 @@
     },
     "packages/protocol": {
       "name": "@wenchat/protocol",
-      "version": "0.1.4",
+      "version": "0.1.10",
+      "dependencies": {
+        "zod": "4.6.5",
+      },
       "devDependencies": {
         "typescript": "^5.5.0",
       },
     },
     "packages/ui": {
       "name": "@wenchat/ui",
-      "version": "0.1.4",
+      "version": "0.1.10",
       "dependencies": {
         "@wenchat/core": "workspace:*",
         "@wenchat/protocol": "workspace:*",
@@ -685,6 +688,8 @@
     "yn": ["yn@3.1.1", "https://registry.npmmirror.com/yn/-/yn-3.1.1.tgz", {}, "sha512-Ux4ygGWsu2c7isFWe8Yu1YluJmqVhxqK2cLXNQA5AcC3QfbGNpM7fu0Y8b/z16pXLnFxZYvWhd3fhBY9DLmC6Q=="],
 
     "yoga-layout": ["yoga-layout@3.2.1", "https://registry.npmmirror.com/yoga-layout/-/yoga-layout-3.2.1.tgz", {}, "sha512-0LPOt3AxKqMdFBZA3HBAt/t/8vIKq7VaQYbuA8WxCgung+p9TVyKRYdpvCb80HcdTN2NkbIKbhNwKUfm3tQywQ=="],
+
+    "zod": ["zod@4.6.5", "https://registry.npmmirror.com/zod/-/zod-4.6.5.tgz", {}, "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q=="],
 
     "@alcalzone/ansi-tokenize/is-fullwidth-code-point": ["is-fullwidth-code-point@4.0.0", "https://registry.npmmirror.com/is-fullwidth-code-point/-/is-fullwidth-code-point-4.0.0.tgz", {}, "sha512-O4L094N2/dZ7xqVdrXhh9r1KODPJpFms8B5sGdJLPy664AgvXsreZUyCQQNItZRDlYug4xStLjNp/sz3HvBowQ=="],
 
