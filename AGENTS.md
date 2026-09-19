@@ -12,7 +12,7 @@ Bun workspaces (`workspaces: ["apps/*", "packages/*"]`); inter-package refs use 
 
 - `apps/cli` — `@wenchat/cli` — Ink TUI entry point
 - `packages/core` — `@wenchat/core` — WebRTC, mDNS, signaling, peer transport
-- `packages/protocol` — `@wenchat/protocol` — pure types for messages/chunks, **plus one runtime dep (`zod`) for codec validation** — keep new deps here to a minimum; prefer types over runtime
+- `packages/protocol` — `@wenchat/protocol` — message types, chunk framing, codec (Zod-validated)
 - `packages/ui` — `@wenchat/ui` — Ink components + helpers
 
 Package-specific gotchas — read on demand when editing those paths:
@@ -56,6 +56,7 @@ There is no `bun run check`; `biome` only lints, it does not typecheck.
 - Strict TS is on: `noUnusedLocals`, `noUnusedParameters`, `noImplicitReturns`, `noFallthroughCasesInSwitch`
 - Per-package `tsconfig.json` excludes `src/**/*.test.ts(x)` from build output (no-op after the per-package `tests/` migration, kept defensively)
 - Logger: `pino` (used in `@wenchat/core` and `@wenchat/cli`); avoid `console.log` in app/package source
+- **Runtime validation: use Zod for every IO boundary.** External data — wire frames (codec), JSONL on disk (outbox), env vars, CLI args, mDNS TXT records, user input — must be parsed via a Zod schema; do not hand-roll validators for shape/range checks. Each package that needs runtime validation declares `zod` as `"workspace:*"` in its `dependencies`; `bun.lock` pins a single version. Schemas for cross-package wire types live in `@wenchat/protocol`; schemas for local IO live in the consuming package. `z.infer<typeof Schema>` is the canonical way to derive TS types from a schema — do not maintain a parallel hand-written type.
 
 ## Testing
 
