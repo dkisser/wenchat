@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { type FileHandle, mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
@@ -81,6 +82,13 @@ export class OutboxStore {
 	private handle: WritableFileHandle | null = null;
 	private queue: Promise<void> = Promise.resolve();
 	private closed = false;
+	// Cached "highest seq we have ever written". PR-2 review edge #2: a
+	// monotonic ACK guard. We seed this lazily from `getHead()` on the first
+	// `markAcked` call (so a process restart sees whatever is on disk) and
+	// bump it on every successful write. Reads inside the withLock chain,
+	// so two concurrent `markAcked` calls cannot both observe a stale head
+	// and both pass the guard.
+	private cachedHead: number | null = null;
 
 	constructor(filePath: string) {
 		this.filePath = filePath;
@@ -119,11 +127,26 @@ export class OutboxStore {
 	 * later removes the entry once enough trailing material has piled up.
 	 * Recording the tombstone is enough — we do not edit the existing
 	 * `msg` row in place (JSONL is append-only by convention).
+	 *
+	 * PR-2 review edge #2: monotonic guard. The receiver's ACK value is
+	 * "highest contiguous received" (ADR 0003 Q2), so any `seq` lower than
+	 * the current head is either a stale retransmit, a wire reorder, or a
+	 * buggy peer — in every case it must NOT roll the head backward. The
+	 * check + write is held inside `withLock` so two concurrent calls
+	 * serialize and cannot both observe a stale cache.
 	 */
 	async markAcked(seq: number): Promise<void> {
 		this.assertOpen();
-		const entry: OutboxEntry = { kind: "ack", seq };
-		await this.writeLine(JSON.stringify(entry));
+		await this.withLock(async () => {
+			if (this.cachedHead === null) {
+				this.cachedHead = await this.getHead();
+			}
+			if (seq <= this.cachedHead) {
+				return;
+			}
+			await this.writeLineNoLock(JSON.stringify({ kind: "ack", seq }));
+			this.cachedHead = seq;
+		});
 	}
 
 	/**
@@ -256,16 +279,26 @@ export class OutboxStore {
 	// --- private ---------------------------------------------------------
 
 	/**
+	 * Open the handle (if needed) and write + fsync one newline-terminated
+	 * line. Caller MUST hold the `withLock` queue — this method does not
+	 * lock itself, because several public methods (markAcked, compact) need
+	 * to read state inside the lock before deciding whether to write.
+	 */
+	private async writeLineNoLock(line: string): Promise<void> {
+		const handle = await this.ensureHandle();
+		await handle.write(`${line}\n`);
+		await handle.sync();
+	}
+
+	/**
 	 * Serialize a write + fsync behind the open-queued promise. The handle
 	 * is opened lazily on first write so a `new OutboxStore(path)` never
-	 * throws (file may not exist yet).
+	 * throws (file may not exist yet). Simple appenders go through here;
+	 * readers-then-writers (markAcked) hold their own lock and call
+	 * `writeLineNoLock` directly.
 	 */
 	private async writeLine(line: string): Promise<void> {
-		await this.withLock(async () => {
-			const handle = await this.ensureHandle();
-			await handle.write(`${line}\n`);
-			await handle.sync();
-		});
+		await this.withLock(() => this.writeLineNoLock(line));
 	}
 
 	/**
@@ -357,7 +390,15 @@ export class OutboxStore {
 			if (line.length === 0) continue;
 			const parsed = safeParseLine(line);
 			if (parsed === null) {
-				getLogger().warn({ path: this.filePath, line }, "outbox: skipping unparseable line");
+				// PR-2 review edge #3: never log the raw line — it may carry
+				// user payload, which a later log rotation would otherwise
+				// ship to disk unredacted. Length + sha256 prefix is enough
+				// to correlate postmortem with the on-disk byte range.
+				const lineHash = createHash("sha256").update(line).digest("hex").slice(0, 8);
+				getLogger().warn(
+					{ path: this.filePath, lineLength: line.length, lineHash },
+					"outbox: skipping unparseable line",
+				);
 				continue;
 			}
 			entries.push(parsed);

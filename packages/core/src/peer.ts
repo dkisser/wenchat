@@ -1,7 +1,12 @@
-import type { FileChunkFramePayload, Message } from "@wenchat/protocol";
+import { readdir, unlink } from "node:fs/promises";
+import { join } from "node:path";
+import type { FileChunkFramePayload, Message, MessageAckMessage } from "@wenchat/protocol";
+import { encode as encodeMessage } from "@wenchat/protocol";
 import type { CloseReason, ConnectionEvent } from "./connectionState";
 import type { SendFileOptions, SendFileResult } from "./fileTransfer";
-import { getLogger } from "./logger";
+import { getLogger, getWorkspaceRoot } from "./logger";
+import { MessageAckScheduler } from "./messageAck";
+import { OutboxStore } from "./outbox";
 import { Session } from "./session";
 import { type IceCandidatePayload, type SdpPayload, SignalingServer } from "./signaling";
 
@@ -33,6 +38,12 @@ export type IncomingOfferInfo = {
  * call constructs a fresh `Session`; the previous one — if any — is
  * closed and dereferenced. App-facing API stays the same; only the
  * underlying object graph has changed.
+ *
+ * PR-3 — Stage 1 application-layer reliability. The peer additionally
+ * owns one `OutboxStore` + `MessageAckScheduler` for the active remote
+ * peer. The pair is created lazily on the first `connect()` /
+ * `acceptOffer()`, persists `seq` across reconnects (ADR 0003 Q10), and
+ * is reused across `swapSession` calls — only the live transport moves.
  */
 export class PeerConnection {
 	private signaling: SignalingServer;
@@ -52,10 +63,28 @@ export class PeerConnection {
 	// complete on the very first handshake. Drained on every swap.
 	private pendingCandidates: IceCandidatePayload[] = [];
 
+	// PR-3 — per-peer reliability state. Lazily constructed on the
+	// first connect / acceptOffer so that a PeerConnection that never
+	// opens a session (e.g. closed before any peer shows up) doesn't
+	// burn an outbox file on disk.
+	private outbox?: OutboxStore;
+	private messageAckScheduler?: MessageAckScheduler;
+	// Set once the scheduler's `initFromOutbox` has loaded the head.
+	// `send()` refuses to operate until then so we never assign a seq
+	// without having first checked the persisted high-water mark.
+	private schedulerReady = false;
+	// The peerId the scheduler was built for. A reconnect to a
+	// different host:port is "the same peer" by the outbox file
+	// convention; this field exists so the tests can confirm
+	// continuity assertions on the same PeerConnection object.
+	private schedulerPeerId?: string;
+
 	private messageListeners: Set<(message: Message) => void> = new Set();
 	private chunkListeners: Set<(chunk: FileChunkFramePayload) => void> = new Set();
 	private stateListeners: Set<(event: ConnectionEvent) => void> = new Set();
 	private incomingListeners: Set<(info: IncomingOfferInfo) => void> = new Set();
+	private outboxAbandonedListeners: Set<(seq: number) => void> = new Set();
+	private outboxEmptyListeners: Set<() => void> = new Set();
 
 	/**
 	 * Most recent teardown intent set by {@link closeGracefully},
@@ -98,6 +127,12 @@ export class PeerConnection {
 		advertiseHost = signalingHost,
 	): Promise<void> {
 		this.localSignalingHost = advertiseHost;
+		// PR-2 review edge #5: clean up stale compaction temp files left
+		// behind by a crashed `OutboxStore.compact()` (the rename target
+		// is in place, but a half-written temp file from a previous
+		// process lingers). Best-effort; missing dir / un-deletable files
+		// are not fatal.
+		await cleanStaleCompactionFiles(join(getWorkspaceRoot(), "outbox"));
 		await this.signaling.start(signalingPort, signalingHost);
 
 		this.signaling.onOffer(async (offer) => {
@@ -122,6 +157,12 @@ export class PeerConnection {
 					getLogger().error({ err: errorText(err) }, "incoming listener threw");
 				}
 			}
+
+			// PR-3 — ensure the per-peer outbox + scheduler are wired up
+			// before the new session can deliver anything. The peerId is
+			// derived from the offer payload's signaling endpoint.
+			const peerId = peerIdForEndpoint(offer.signalingHost, offer.signalingPort);
+			await this.ensureMessageAckScheduler(peerId);
 
 			const newSession = await Session.accept({
 				signaling: this.signaling,
@@ -169,6 +210,12 @@ export class PeerConnection {
 	}
 
 	async connect(peerHost: string, peerPort: number): Promise<Session> {
+		// PR-3 — ensure the per-peer outbox + scheduler exist before we
+		// open the session, so the very first send on a fresh process can
+		// pick up the persisted `seq` from the outbox header (Q10).
+		const peerId = peerIdForEndpoint(peerHost, peerPort);
+		await this.ensureMessageAckScheduler(peerId);
+
 		const newSession = await Session.initiate({
 			signaling: this.signaling,
 			localHost: this.localSignalingHost,
@@ -189,7 +236,34 @@ export class PeerConnection {
 		if (!this.session) {
 			throw new Error("Data channel not ready");
 		}
-		this.session.send(message);
+		// PR-3 — assign a per-peer monotonic seq, persist the encoded
+		// payload to the outbox, and arm the per-message retransmit timer.
+		// All three happen before the wire send so the sender's view of
+		// the world is consistent: by the time the byte reaches the
+		// transport, the outbox already has the row and a recovery
+		// path exists if the ACK never lands.
+		const scheduler = this.messageAckScheduler;
+		if (!scheduler || !this.outbox || !this.schedulerReady) {
+			throw new Error("Data channel not ready");
+		}
+		const seq = scheduler.allocateSeq();
+		const tagged: Message = { ...message, seq };
+		const encodedBytes = encodeMessage(tagged);
+		const encodedString = new TextDecoder().decode(encodedBytes);
+		// Persist + register retransmit BEFORE the wire send. A crash
+		// between the wire send and this point would lose the message;
+		// doing it before means the worst case is "we sent but no row
+		// landed" — a single lost message is recoverable (the peer will
+		// surface a missing-message complaint), whereas "row landed but
+		// no timer fires" is a silent loss.
+		void this.outbox.append(seq, encodedString).catch((err: unknown) => {
+			getLogger().error(
+				{ err: errorText(err), seq },
+				"outbox.append failed — sender's recovery view is incomplete",
+			);
+		});
+		scheduler.scheduleRetransmit(seq, encodedString);
+		this.session.send(tagged);
 	}
 
 	/**
@@ -272,6 +346,11 @@ export class PeerConnection {
 	 */
 	disconnect(): void {
 		this.closeIntent = "local-disconnect";
+		// PR-3 — ADR 0003 Q3: emit a final ACK before tearing down so
+		// the peer's view of our progress is current. Best-effort: if
+		// the channel is already dead, the sendAck callback silently
+		// drops it.
+		this.messageAckScheduler?.closeSession();
 		this.closeSession("local-disconnect");
 	}
 
@@ -325,6 +404,10 @@ export class PeerConnection {
 			// session that belongs to someone else's call.
 			if (this.session !== session) return;
 		}
+		// PR-3 — emit a final ACK so the peer has our latest progress
+		// recorded before the channel goes away. The peer will then
+		// stop retransmitting whatever we successfully received.
+		this.messageAckScheduler?.closeSession();
 		this.closeSession(reason);
 		if (stopSignaling) {
 			// Fire-and-forget: `server.close()` only invokes its callback
@@ -405,6 +488,111 @@ export class PeerConnection {
 	}
 
 	/**
+	 * PR-3 — observe the current sender-side outbox depth (unacked +
+	 * pending retransmits). Used by tests to assert drain-to-zero after a
+	 * graceful close, and by future CLI progress reporting. Returns 0
+	 * when no peer / outbox exists yet.
+	 */
+	outboxSize(): number {
+		return this.messageAckScheduler ? this.messageAckScheduler.pendingCount() : 0;
+	}
+
+	/**
+	 * Fires when a sender-side message exceeds its retry budget
+	 * (ADR 0003 Q4). Subscribed by the CLI in PR-6 to surface a system
+	 * message; no other listener fires today.
+	 */
+	onOutboxAbandoned(callback: (seq: number) => void): () => void {
+		this.outboxAbandonedListeners.add(callback);
+		return () => {
+			this.outboxAbandonedListeners.delete(callback);
+		};
+	}
+
+	/**
+	 * Fires exactly once per outbox-empty transition (sender side).
+	 * Useful for CLI status indicators that flip "delivering" → "idle".
+	 */
+	onOutboxEmpty(callback: () => void): () => void {
+		this.outboxEmptyListeners.add(callback);
+		return () => {
+			this.outboxEmptyListeners.delete(callback);
+		};
+	}
+
+	/**
+	 * PR-3 — ensure the per-peer outbox + scheduler exist for `peerId`.
+	 * Lazily constructed on first connect / acceptOffer so a
+	 * PeerConnection that never opens a session doesn't burn an outbox
+	 * file on disk.
+	 *
+	 * The scheduler is sticky to the first peerId; subsequent
+	 * connect/acceptOffer calls reuse the same instance regardless of
+	 * endpoint. This is what makes `swapSession` continuity hold: the
+	 * sender-side seq counter and retransmit timers outlive any one
+	 * transport session.
+	 */
+	private async ensureMessageAckScheduler(peerId: string): Promise<void> {
+		if (this.messageAckScheduler && this.schedulerPeerId === peerId) {
+			return;
+		}
+		// A different peerId is unexpected under the current 1-to-1 model,
+		// but if it happens we close the previous scheduler cleanly so
+		// its timers don't leak.
+		if (this.messageAckScheduler) {
+			this.messageAckScheduler.closeSession();
+		}
+		const outboxPath = join(getWorkspaceRoot(), "outbox", `${peerId}.jsonl`);
+		this.outbox = new OutboxStore(outboxPath);
+		this.messageAckScheduler = new MessageAckScheduler({
+			outbox: this.outbox,
+			sendAck: (ack) => this.dispatchOutbound(ack),
+			sendMessage: (msg) => this.dispatchOutbound(msg),
+			onOutboxAbandoned: (seq) => this.notifyOutboxAbandoned(seq),
+			onOutboxEmpty: () => this.notifyOutboxEmpty(),
+		});
+		this.schedulerPeerId = peerId;
+		await this.messageAckScheduler.initFromOutbox();
+		this.schedulerReady = true;
+	}
+
+	/**
+	 * PR-3 — push an outbound frame through the current session. Used by
+	 * the scheduler's `sendAck` and `sendMessage` callbacks. A no-op
+	 * when no session is active (the transport will resync on the next
+	 * session); the retransmit timer keeps firing so a queued message
+	 * still gets a chance to land.
+	 */
+	private dispatchOutbound(message: Message): void {
+		if (!this.session) {
+			getLogger().debug({ type: message.type }, "scheduler outbound: no session, dropping");
+			return;
+		}
+		this.session.send(message);
+	}
+
+	private notifyOutboxAbandoned(seq: number): void {
+		getLogger().error({ seq }, "outbox abandoned");
+		for (const listener of this.outboxAbandonedListeners) {
+			try {
+				listener(seq);
+			} catch (err) {
+				getLogger().error({ err: errorText(err), seq }, "outbox-abandoned listener threw");
+			}
+		}
+	}
+
+	private notifyOutboxEmpty(): void {
+		for (const listener of this.outboxEmptyListeners) {
+			try {
+				listener();
+			} catch (err) {
+				getLogger().error({ err: errorText(err) }, "outbox-empty listener threw");
+			}
+		}
+	}
+
+	/**
 	 * Test-only escape hatch: forcibly close the underlying pc to
 	 * simulate abrupt process death without going through the graceful
 	 * shutdown path.
@@ -443,6 +631,32 @@ export class PeerConnection {
 		// 3. Wire the new session's events into our listener sets.
 		this.sessionUnsubscribers.push(
 			newSession.onMessage((message) => {
+				// PR-3 — `message-ack` is control plane; the scheduler
+				// owns it, app code must never see it (it has no id/
+				// timestamp semantics a chat log would know what to do
+				// with).
+				if (message.type === "message-ack") {
+					const ackMsg: MessageAckMessage = message;
+					if (this.messageAckScheduler) {
+						void this.messageAckScheduler.noteAck(ackMsg.payload.ack);
+					}
+					return;
+				}
+				// PR-3 — basic dedup (PR-4 ReceiveWindow stand-in). For
+				// any seq-bearing message, drop the second sighting. The
+				// scheduler's `noteInbound` is the gate: it returns
+				// `"duplicate"` for a recently-seen seq (which it then
+				// drops without forwarding), `"new"` for everything else.
+				if (message.seq !== null && message.seq !== undefined) {
+					const result = this.messageAckScheduler?.noteInbound(message.seq);
+					if (result === "duplicate") {
+						getLogger().debug(
+							{ seq: message.seq, type: message.type },
+							"dropping duplicate inbound",
+						);
+						return;
+					}
+				}
 				for (const listener of this.messageListeners) {
 					try {
 						listener(message);
@@ -488,3 +702,47 @@ export class PeerConnection {
 // Re-export `SdpPayload` so existing consumers don't have to reach into
 // `./signaling` directly.
 export type { SdpPayload };
+
+/**
+ * Derive a stable peerId from a signaling endpoint. The endpoint is
+ * `host:port` — for our LAN-only deployment host is a concrete IPv4 and
+ * port is whatever the OS gave us. Across reconnects the host is stable;
+ * the port can change when the peer's process restarts. PR-3 accepts the
+ * imperfection: a different port = a different outbox = a fresh outbox
+ * (acceptable — the previous conversation is genuinely lost).
+ */
+function peerIdForEndpoint(host: string | undefined, port: number | undefined): string {
+	const safeHost = host && host.length > 0 ? host : "unknown";
+	const safePort = typeof port === "number" && port > 0 ? String(port) : "0";
+	return `${safeHost}_${safePort}`;
+}
+
+/**
+ * PR-2 review edge #5: clean up stale compaction temp files left behind
+ * by a crashed `OutboxStore.compact()`. The compactor writes a temp
+ * sibling (`<filePath>.compact-<pid>-<ts>`) and atomically renames it
+ * over the live file. A crash between the write and the rename leaves
+ * the temp behind; a future `OutboxStore` opening the live file would
+ * ignore it, but the bytes stay on disk forever.
+ *
+ * Best-effort: a missing dir, an unreadable dir, or an undeletable file
+ * is logged at debug and skipped — none of these should prevent startup.
+ */
+async function cleanStaleCompactionFiles(outboxDir: string): Promise<void> {
+	let entries: string[];
+	try {
+		entries = await readdir(outboxDir);
+	} catch {
+		// Directory doesn't exist yet — nothing to clean.
+		return;
+	}
+	for (const entry of entries) {
+		if (!entry.includes(".compact-")) continue;
+		try {
+			await unlink(join(outboxDir, entry));
+			getLogger().debug({ file: entry }, "cleaned stale outbox compaction temp");
+		} catch {
+			// Leave the file; next launch will retry.
+		}
+	}
+}

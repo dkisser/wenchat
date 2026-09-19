@@ -2,6 +2,7 @@ export * from "./connectionState";
 export * from "./discovery";
 export * from "./fileTransfer";
 export * from "./logger";
+export * from "./messageAck";
 export * from "./network";
 export * from "./outbox";
 export * from "./peer";

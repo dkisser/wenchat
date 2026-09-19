@@ -98,3 +98,57 @@ Every mutator funnels through an internal promise queue. Two `await store.append
 ### `close()` semantics
 
 Idempotent. Sets an internal `closed` flag; every subsequent mutator (`append`, `markAcked`, `unackedFrom`, `getHead`, `compact`) rejects with `OutboxStore: operation on a closed store`. The reopen path is "construct a fresh `OutboxStore(path)` and read the file" — there is no `open()` method.
+
+### PR-2 review fixes (landed in PR-3)
+
+The outbox shipped with two review-driven edges that the subsequent PR addressed; documenting them here so a future reader does not "re-fix" them or treat them as regressions:
+
+- **Monotonic ACK guard** (`OutboxStore.markAcked`): the receiver's ACK value is "highest contiguous seq received" (ADR 0003 Q2), so a buggy peer or wire reorder that delivers `ack(5)` after `ack(10)` must NOT roll the head backward. `markAcked` now caches the highest head it has written (seeded lazily from `getHead()` for crash-recovery correctness) and refuses to write a tombstone for any `seq <= cachedHead`. The check + write is held inside the `withLock` chain so two concurrent calls cannot both observe a stale cache.
+- **Unparseable-line log shape** (`OutboxStore.readEntries`): the warn that surfaces on a corrupt line used to include the raw bytes — which can carry user payload. The new shape is `{ lineLength, lineHash }` where `lineHash` is the first 8 hex chars of the line's sha256. Enough to correlate postmortem with the on-disk byte range, never enough to leak the message.
+- **Stale compaction cleanup** (`PeerConnection.startListening`): the compactor writes a temp sibling (`<filePath>.compact-<pid>-<ts>`) and renames it atomically over the live file. A crash between the write and the rename leaves the temp behind; `startListening` now scans the outbox directory for `*.compact-*` and best-effort `unlink`s them. Missing dir / undeletable file is not fatal — the next launch retries.
+
+## MessageAckScheduler
+
+`MessageAckScheduler` (PR-3, `packages/core/src/messageAck.ts`) is the per-peer application-layer reliability state machine. One instance lives on `PeerConnection`, created lazily on the first `connect()` / `acceptOffer()` for a given peer, and reused across `swapSession` so the seq counter, retransmit timers, and inbound contiguity state survive any transport swap (ADR 0003 Q10).
+
+### Two roles share state
+
+- **Sender:** `allocateSeq()` returns the next monotonic seq (loaded from `outbox.getHead()` on construction via `initFromOutbox`); `peer.ts::send()` appends the encoded payload to the outbox, registers a per-message retransmit timer with `scheduleRetransmit(seq, encoded)`, and dispatches the message on the wire.
+- **Receiver:** `noteInbound(seq)` updates the highest contiguous seq, increments the "since last ACK" counter, and emits an ACK per the trigger schedule. Inbound `message-ack` frames route to `noteAck(ack)` which clears matching retransmit timers and tombstone-writes via `outbox.markAcked`.
+
+### ACK trigger (ADR 0003 Q3)
+
+Whichever happens first:
+
+| Trigger              | Cadence                                                |
+| -------------------- | ------------------------------------------------------ |
+| Idle timer           | 200 ms after the last `noteInbound`                    |
+| Every-16 messages    | When `inboundCountSinceLastAck >= 16`                  |
+| Session close        | `closeSession()` calls `flushAck()` before going dark  |
+
+`flushAck()` is also exposed for the gap-detection path (PR-4 will wire it from the receive window).
+
+### Retransmit policy (ADR 0003 Q4)
+
+- Initial delay: 2 s after `scheduleRetransmit`.
+- Exponential backoff: ×2, capped at 30 s.
+- Give up after 5 attempts: emit `outbox-abandoned` with the abandoned `seq`; the CLI surfaces this as a system message in PR-6.
+- Each message has its own timer; `noteAck(ack)` clears every timer for `seq <= ack` in one pass.
+- A retransmit re-emits the SAME bytes (`encoded` string) so the receiver's dedup catches anything it should not re-deliver.
+
+### Event API
+
+| Event              | When                                                  | Where subscribed                       |
+| ------------------ | ----------------------------------------------------- | -------------------------------------- |
+| `outbox-abandoned` | After 5 failed retransmits for a given `seq`          | `PeerConnection.onOutboxAbandoned(cb)` |
+| `outbox-empty`     | Once per transition from non-empty → empty            | `PeerConnection.onOutboxEmpty(cb)`     |
+
+Both are emitted through `PeerConnection`'s listener sets so the CLI can subscribe without reaching into the scheduler directly.
+
+### Basic dedup (PR-3 stand-in for PR-4 ReceiveWindow)
+
+`noteInbound` keeps a bounded `Set<number>` of recently-seen seqs (window = 64). The first sighting of a seq advances contiguity and triggers ACK logic; subsequent sightings within the window return `"duplicate"` so the caller (peer.ts's session forwarder) can drop them silently. The LRU eviction is by `Set` insertion order — PR-4 replaces this with the 256-entry LRU `ReceiveWindow` from ADR 0003 Q7; the eviction policy and the "duplicate vs new" contract are the only things that change.
+
+### Cross-`swapSession` continuity
+
+The scheduler is sticky to the first peerId it was built for. `PeerConnection.swapSession` does NOT touch it — only the `sendAck` / `sendMessage` callbacks (which dispatch through `PeerConnection.session` — the new one) point at the fresh transport. This is what guarantees `seq` continuity across a network drop: a post-swap `allocateSeq()` returns `lastKnown + 1`, never resets to 1.

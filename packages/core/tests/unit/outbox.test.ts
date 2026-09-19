@@ -117,6 +117,54 @@ describe("OutboxStore — markAcked", () => {
 		expect(await store.getHead()).toBe(2);
 		await store.close();
 	});
+
+	// PR-2 review edge #2: monotonic ACK guard. A late or reordered ACK must
+	// not roll the head backward (the receiver's ACK is "highest contiguous
+	// received" — a value lower than the current head is either a stale
+	// retransmit or a buggy peer). Without this guard, a buggy peer's
+	// out-of-order ACKs would let the sender stop retransmitting messages
+	// the receiver never actually got.
+	it("is a no-op when seq is less than the current head", async () => {
+		const path = join(scratchDir, "outbox.jsonl");
+		const store = new OutboxStore(path);
+		await store.append(1, "a");
+		await store.append(2, "b");
+		await store.markAcked(5);
+		// Replay: pretend the peer sent an ACK for an older seq.
+		await store.markAcked(3);
+		await store.markAcked(5);
+		await store.close();
+
+		// No tombstone for seq=3 or the second seq=5 lands on disk.
+		const lines = await readRawLines(path);
+		expect(lines).toEqual([
+			{ kind: "msg", seq: 1, encoded: "a" },
+			{ kind: "msg", seq: 2, encoded: "b" },
+			{ kind: "ack", seq: 5 },
+		]);
+	});
+
+	it("monotonic guard survives a process restart (head re-read from disk)", async () => {
+		const path = join(scratchDir, "outbox.jsonl");
+		const writer = new OutboxStore(path);
+		await writer.append(1, "a");
+		await writer.markAcked(10);
+		await writer.close();
+
+		// Fresh store reads the persisted head before applying the guard.
+		const reopened = new OutboxStore(path);
+		await reopened.markAcked(7);
+		await reopened.markAcked(10);
+		await reopened.markAcked(11);
+		await reopened.close();
+
+		const lines = await readRawLines(path);
+		expect(lines).toEqual([
+			{ kind: "msg", seq: 1, encoded: "a" },
+			{ kind: "ack", seq: 10 },
+			{ kind: "ack", seq: 11 },
+		]);
+	});
 });
 
 describe("OutboxStore — unackedFrom", () => {
@@ -356,6 +404,46 @@ describe("OutboxStore — crash recovery", () => {
 		expect(await store.getHead()).toBe(0);
 		expect(await store.unackedFrom(0)).toEqual([{ seq: 1, encoded: "x" }]);
 		await store.close();
+	});
+
+	// PR-2 review edge #3: the unparseable-line warn must not echo the raw
+	// bytes (they may contain user payload). The replacement is a length
+	// plus an 8-char sha256 prefix — enough to correlate postmortem without
+	// shipping the original frame.
+	it("warns with lineLength + sha256 prefix instead of the raw line", async () => {
+		const path = join(scratchDir, "outbox.jsonl");
+		const valid = '{"kind":"msg","seq":1,"encoded":"first"}\n';
+		// Embed a sentinel string so any accidental raw-line leak would show up.
+		const sentinel = "SENTINEL-USER-PAYLOAD-DO-NOT-LOG";
+		const garbage = `${sentinel}\x00\x01not-json\xff\n`;
+		await writeFile(path, valid + garbage);
+
+		const captured: Array<{ meta: Record<string, unknown>; msg: string }> = [];
+		const { getLogger } = await import("../../src/logger");
+		const originalWarn = getLogger().warn.bind(getLogger());
+		getLogger().warn = ((meta: Record<string, unknown>, msg?: string) => {
+			captured.push({ meta, msg: msg ?? "" });
+		}) as never;
+		try {
+			const store = new OutboxStore(path);
+			await store.unackedFrom(0);
+			await store.close();
+		} finally {
+			getLogger().warn = originalWarn as never;
+		}
+
+		// At least one warn about an unparseable line.
+		const warn = captured.find((c) => c.msg.includes("unparseable"));
+		expect(warn).toBeDefined();
+		expect(warn?.meta).not.toHaveProperty("line");
+		// Sanity: the sentinel must not appear in any log field, even encoded.
+		const serialized = JSON.stringify(captured);
+		expect(serialized.includes(sentinel)).toBe(false);
+		// And the structured fields are present.
+		expect(warn?.meta).toHaveProperty("lineLength");
+		expect(typeof warn?.meta.lineLength).toBe("number");
+		expect(warn?.meta).toHaveProperty("lineHash");
+		expect((warn?.meta.lineHash as string).length).toBe(8);
 	});
 });
 

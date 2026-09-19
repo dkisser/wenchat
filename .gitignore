@@ -20,3 +20,8 @@ docs/superpowers/
 .claude/
 # Local agent state: imported skills + local AGENTS.md copy. Machine-local; keep out of git.
 .agents/
+
+# Per-peer outbox files (ADR 0003 Q5). Created by PeerConnection under
+# <workspaceRoot>/outbox/<peerId>.jsonl — test runs leave them in the
+# repo cwd (which IS the workspace root in dev). Keep them local.
+outbox/
