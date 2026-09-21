@@ -76,11 +76,14 @@ const PROGRESS_GRANULARITY_BYTES = 256 * 1024;
 const FILE_CHUNK_ACK_INTERVAL = 32;
 
 /** PR-5 — initial delay before the first retransmit of an unacked chunk.
- *  Faster than the chat outbox (2 s) because chunk retransmits are
- *  triggered by an inbound ACK that explicitly names the missing
- *  index — there's no "wait for any response at all" window, just
- *  the round-trip for the read-from-disk + sendBinary path. */
-const FILE_INITIAL_RETRANSMIT_MS = 200;
+ *  Deliberately SLOW (2 s, same order as the chat outbox): SCTP already
+ *  retransmits lost data on its own RTO, and this layer firing sooner
+ *  stacks duplicate bulk traffic onto a congested association — measured
+ *  on a lossy LAN as thousands of queued chunks and heartbeat starvation
+ *  (2026-09-21 incident: transfer completes, connection dies seconds
+ *  later). This scheduler owns the "SCTP made no progress for a long
+ *  time" case, not fast loss recovery. */
+const FILE_INITIAL_RETRANSMIT_MS = 2_000;
 /** PR-5 — exponential backoff cap (mirrors chat outbox ADR 0003 Q4). */
 const FILE_MAX_RETRANSMIT_MS = 30_000;
 /** PR-5 — give up after this many attempts on a single chunk (ADR 0003 Q4). */

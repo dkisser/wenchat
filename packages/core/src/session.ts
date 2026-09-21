@@ -334,6 +334,12 @@ export class Session {
 	private attachTransport(channel: RTCDataChannel): void {
 		this.transport = new DataTransport(channel);
 		this.transport.onMessage((message) => {
+			// Every inbound frame is liveness proof: during a bulk transfer
+			// the peer's pings queue behind the data and arrive late (or
+			// never), so the watchdog must be re-armed by traffic, not just
+			// by ping/pong — otherwise a healthy mid-transfer connection
+			// reads as dead (2026-09-21 incident).
+			this.heartbeat?.noteInbound();
 			// Heartbeat traffic stays in the scheduler; user-facing
 			// listeners only see application messages.
 			if (message.type === "ping" || message.type === "pong") {
@@ -355,6 +361,9 @@ export class Session {
 			}
 		});
 		this.transport.onFileChunk((chunk) => {
+			// Chunks are inbound traffic too — same liveness reasoning as in
+			// the message listener above.
+			this.heartbeat?.noteInbound();
 			for (const listener of this.chunkListeners) {
 				try {
 					listener(chunk);

@@ -216,7 +216,7 @@ Both sides keep a per-`transferId` view of the chunks; the bitmap is the **only*
 
 - Bit `i` set → remove `i` from unacked, clear its retry counter + timer.
 - Bit `i` clear (and `i <= lastIndex`) → ensure `i` is in unacked.
-- After reconciliation, re-arm a retransmit timer for every still-unacked chunk. Initial delay `FILE_INITIAL_RETRANSMIT_MS = 200 ms` (faster than chat's 2 s because chunk retransmits are triggered by an ACK that already names the missing index), then `× 2` exponential backoff capped at `FILE_MAX_RETRANSMIT_MS = 30 s`. After `FILE_MAX_RETRANSMIT_ATTEMPTS = 5` failed attempts on any one chunk, the sender calls `onTransferAbandoned(transferId)` and emits a best-effort `file-abort` so the receiver can drop the partial temp file. PR-6 wires `onTransferAbandoned` to the chat log as a system message.
+- After reconciliation, re-arm a retransmit timer for every still-unacked chunk. Initial delay `FILE_INITIAL_RETRANSMIT_MS = 2 s` (deliberately same order as the chat outbox: SCTP retransmits lost data on its own RTO, and firing sooner stacks duplicate bulk traffic onto a congested association — the 2026-09-21 "transfer completes, connection dies" incident), then `× 2` exponential backoff capped at `FILE_MAX_RETRANSMIT_MS = 30 s`. After `FILE_MAX_RETRANSMIT_ATTEMPTS = 5` failed attempts on any one chunk, the sender calls `onTransferAbandoned(transferId)` and emits a best-effort `file-abort` so the receiver can drop the partial temp file. PR-6 wires `onTransferAbandoned` to the chat log as a system message.
 
 `unackedIndices` is LRU-evicted at `DEFAULT_FILE_UNACKED_BITMAP_CAP = 256` so a multi-thousand-chunk transfer doesn't pin proportional memory; the receiver's bitmap is the authoritative source of truth, so an evicted index re-added on the next ACK lands cleanly.
 
@@ -233,7 +233,7 @@ The transfer only fails when the **sender** gives up — five failed retries on 
 
 `FileReceiver.finishTransfer` schedules the final validation via `setTimeout(this.validationDelayMs)` (default 3000 ms) **only when** the post-file-end bitmap shows a gap (`expectedNext < totalChunks`). The wait runs **outside** the receiver's task queue so retransmit chunks can land during it; the deferred validation reads the (potentially fully-recovered) transfer state and either completes or fails. The happy path validates on the next event-loop tick with zero wait.
 
-The default `validationDelayMs` of 3000 ms is the worst-case budget for: sender's first retransmit (200 ms) + ACK round-trip + N retransmit writes against the receiver's queue + sha256 read of the temp file. Tests that don't exercise the recovery path pass `validationDelayMs: 0` to keep happy-path latency deterministic; the `FileReceiver` constructor option is the public knob.
+The default `validationDelayMs` of 3000 ms is the worst-case budget for: sender's first retransmit (2 s) + ACK round-trip + N retransmit writes against the receiver's queue + sha256 read of the temp file. Tests that don't exercise the recovery path pass `validationDelayMs: 0` to keep happy-path latency deterministic; the `FileReceiver` constructor option is the public knob.
 
 ### Hash-from-disk at completion
 

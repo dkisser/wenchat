@@ -32,6 +32,10 @@ These lock `stage-1-implementation-plan.md` §A.2 + §F.5. Each row is the imple
 - **Chosen — locked defaults from §A.2.** Each was annotated with rationale in the plan; rationale is not repeated here.
 - **Rejected — protocol version byte.** Q11 considered adding a version byte for explicit feature negotiation. Rejected because the additive `seq: null` field fully covers backward compatibility, and a version byte would force every future change to bump it. Reserved for the day a true breaking change is needed.
 
+## Amendments
+
+- **2026-09-21 — chunk retransmit initial delay 200 ms → 2 s; heartbeat watchdog semantics.** Production incident: after a file transfer completed, the connection died within seconds ("Lost connection … Reconnecting … Failed to connect"). Reproduced on a lossy LAN: `FileSender`'s 200 ms retransmit stacked duplicate bulk traffic onto SCTP's own congestion recovery (sender queue froze at ~4.7 k chunks, association wedged), and the 4 s heartbeat watchdog — re-armed only by ping/pong — fired while file/ACK traffic was still flowing. Amendments (operational parameters only; wire format unchanged): `FILE_INITIAL_RETRANSMIT_MS = 2 s` (SCTP owns fast loss recovery; the app layer owns "SCTP made no progress for a long time"); heartbeat watchdog is re-armed by ANY inbound frame and fires after 15 s of total silence; pings are suppressed while other traffic has been seen within the interval. See `CONTEXT.md` "Heartbeat" and `docs/devops/core.md` "Sender-side retransmit policy".
+
 ## Consequences
 
 - Implementation PRs reference this ADR by number; deviations require an ADR amendment.

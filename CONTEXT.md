@@ -17,7 +17,7 @@ The werift `RTCDataChannel` named `"wenchat"`. Default `ordered: true`, `maxRetr
 _Avoid_: Channel, pipe
 
 **Heartbeat**:
-Application-layer keepalive ping sent every 2s with a 4s timeout (`packages/core/src/heartbeat.ts`). Detects dead links independently of SCTP-level signals.
+Application-layer keepalive (`packages/core/src/heartbeat.ts`). Pings every 2s, suppressed while other inbound traffic has been seen within the interval; a 15s watchdog fires only on TOTAL silence — any inbound frame (ping/pong, text, file chunk, control ACK) re-arms it, so a mid-transfer connection is never mistaken for a dead one. Detects dead links independently of SCTP-level signals.
 _Avoid_: Ping, keepalive
 
 **Host candidate**:

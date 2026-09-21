@@ -168,4 +168,59 @@ describe("HeartbeatScheduler", () => {
 		h.hb.stop();
 		expect(h.sends.filter((m) => m.type === "ping").length).toBeGreaterThanOrEqual(2);
 	});
+
+	// 2026-09-21 incident: mid-transfer, the peer's pings queue behind
+	// megabytes of file data and stop arriving, while chunks keep flowing.
+	// The watchdog must treat ANY inbound frame as liveness — not just
+	// ping/pong — or a healthy connection reads as dead.
+	it("noteInbound (any application traffic) re-arms the watchdog", async () => {
+		const h = makeHarness({ intervalMs: 20, timeoutMs: 60 });
+		h.hb.start();
+		const feeder = setInterval(() => h.hb.noteInbound(), 20);
+		await sleep(140);
+		clearInterval(feeder);
+		h.hb.stop();
+		expect(h.timeouts.count).toBe(0);
+	});
+
+	it("handleIncoming(text) also marks liveness (no ping/pong required)", async () => {
+		const h = makeHarness({ intervalMs: 20, timeoutMs: 60 });
+		h.hb.start();
+		const feeder = setInterval(() => {
+			h.hb.handleIncoming({
+				type: "text",
+				id: "x",
+				timestamp: 0,
+				payload: { text: "chunk-adjacent traffic" },
+			});
+		}, 20);
+		await sleep(140);
+		clearInterval(feeder);
+		h.hb.stop();
+		expect(h.timeouts.count).toBe(0);
+	});
+
+	it("suppresses pings while other traffic flows, resumes when idle", async () => {
+		const h = makeHarness({ intervalMs: 40, timeoutMs: 5000 });
+		h.hb.start();
+		const feeder = setInterval(() => h.hb.noteInbound(), 10);
+		await sleep(95);
+		clearInterval(feeder);
+		const pingsDuringTraffic = h.sends.filter((m) => m.type === "ping").length;
+		expect(pingsDuringTraffic).toBe(0);
+
+		await sleep(100);
+		h.hb.stop();
+		const pingsAfterIdle = h.sends.filter((m) => m.type === "ping").length;
+		expect(pingsAfterIdle).toBeGreaterThanOrEqual(1);
+	});
+
+	it("noteInbound after stop() is a safe no-op", async () => {
+		const h = makeHarness({ intervalMs: 20, timeoutMs: 30 });
+		h.hb.start();
+		h.hb.stop();
+		h.hb.noteInbound();
+		await sleep(40);
+		expect(h.timeouts.count).toBe(0);
+	});
 });

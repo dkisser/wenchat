@@ -17,17 +17,27 @@ export type HeartbeatSchedulerOptions = {
 };
 
 const DEFAULT_INTERVAL_MS = 2000;
-const DEFAULT_TIMEOUT_MS = 4000;
+/** 15 s, not 4 s: the watchdog must outlive SCTP's own congestion recovery
+ *  (T3-rtx doubles its RTO per failure, and a burst-loss episode can take
+ *  many seconds to drain). A peer that is still delivering ANY inbound
+ *  frame re-arms the watchdog via `noteInbound`, so this deadline only
+ *  fires on total silence — a genuinely dead association, where 4 s
+ *  killed healthy connections stuck behind a retransmit backlog
+ *  (2026-09-21 incident: file transfer completes, connection dies). */
+const DEFAULT_TIMEOUT_MS = 15_000;
 
 /**
  * Application-layer heartbeat over the wenchat DataChannel.
  *
- * `start()` schedules a tick that emits a `ping` every `intervalMs`. A
- * watchdog fires `onTimeout` if no inbound ping/pong has been seen within
- * `timeoutMs`. Any inbound ping also auto-replies with a pong. This
- * single-tick-plus-watchdog shape handles BOTH "I sent a ping and got no
- * pong" and "I haven't heard anything from the peer" without piling up
- * orphaned timers.
+ * `start()` schedules a tick that emits a `ping` every `intervalMs`,
+ * skipped while other inbound traffic has been seen within the interval
+ * (that traffic already proved liveness — no point queueing a ping behind
+ * it on a congested association). A watchdog fires `onTimeout` if NO
+ * inbound frame at all (ping/pong, text, file chunk, or control ACK) has
+ * been seen within `timeoutMs`; Session feeds every inbound frame to
+ * `noteInbound`/`handleIncoming`. Any inbound ping also auto-replies with
+ * a pong. This shape handles liveness without piling up orphaned timers,
+ * and it never mistakes "peer is mid-transfer" for "peer is dead".
  */
 export class HeartbeatScheduler {
 	private readonly send: (message: Message) => void;
@@ -39,6 +49,10 @@ export class HeartbeatScheduler {
 	private tickHandle: ReturnType<typeof setTimeout> | null = null;
 	private watchdogHandle: ReturnType<typeof setTimeout> | null = null;
 	private running = false;
+	/** Last time ANY inbound frame was seen (ping/pong, text, file chunk,
+	 *  ACK). Null = nothing received yet. Drives both watchdog re-arming
+	 *  (`noteInbound`) and idle detection for ping suppression. */
+	private lastInboundAt: number | null = null;
 
 	constructor(options: HeartbeatSchedulerOptions) {
 		this.send = options.send;
@@ -63,16 +77,27 @@ export class HeartbeatScheduler {
 	}
 
 	handleIncoming(message: Message): void {
+		// Any frame handled here is liveness proof too; the ping branch
+		// additionally auto-replies with a pong.
+		this.lastInboundAt = Date.now();
+		this.armWatchdog();
 		if (message.type === "ping") {
 			this.send(createPong(message.payload.nonce));
 		}
-		// Inbound ping/pong proves liveness — re-arm the watchdog. Text and
-		// file traffic never reaches this scheduler (PeerConnection filters
-		// them out before forwarding to user listeners), so they aren't a
-		// concern here.
-		if (message.type === "ping" || message.type === "pong") {
-			this.armWatchdog();
-		}
+	}
+
+	/**
+	 * Record ANY inbound application traffic — text, file chunks, control
+	 * ACKs — as liveness proof. During a bulk transfer the peer's pings
+	 * queue behind megabytes of data and arrive late (or never), while
+	 * chunk/ACK traffic keeps flowing; treating only ping/pong as liveness
+	 * made the watchdog kill healthy mid-transfer connections. Safe to call
+	 * for every inbound frame: it only re-arms a running watchdog and
+	 * stamps the traffic clock.
+	 */
+	noteInbound(): void {
+		this.lastInboundAt = Date.now();
+		this.armWatchdog();
 	}
 
 	private scheduleTick(): void {
@@ -82,7 +107,12 @@ export class HeartbeatScheduler {
 
 	private tick(): void {
 		if (!this.running) return;
-		if (this.canSend()) {
+		// Suppress the ping when other traffic arrived within the last
+		// interval: the peer's frames already proved liveness (and were
+		// recorded via noteInbound/handleIncoming), so queueing a ping
+		// behind them on a congested association buys nothing.
+		const quiet = this.lastInboundAt === null || Date.now() - this.lastInboundAt >= this.intervalMs;
+		if (this.canSend() && quiet) {
 			this.send(createPing(randomUUID()));
 		}
 		this.scheduleTick();
