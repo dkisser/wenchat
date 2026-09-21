@@ -84,6 +84,24 @@ export class Session {
 		this.signaling = signaling;
 	}
 
+	// Test-only override for the heartbeat schedule — see
+	// `_setHeartbeatTimingForTest`. Static rather than per-Session: no test
+	// constructs sessions with two different schedules at once.
+	private static heartbeatTimingOverride: { intervalMs: number; timeoutMs: number } | undefined;
+
+	/**
+	 * Test-only seam: shrink the heartbeat schedule of every Session
+	 * constructed after this call (production default: 2 s ping interval,
+	 * 15 s total-silence watchdog). The liveness integration tests use
+	 * this to prove inbound traffic re-arms the watchdog without burning
+	 * 15 s per case. Pass undefined to restore production timing.
+	 */
+	static _setHeartbeatTimingForTest(
+		timing: { intervalMs: number; timeoutMs: number } | undefined,
+	): void {
+		Session.heartbeatTimingOverride = timing;
+	}
+
 	/**
 	 * Construct a Session for the initiator side: create a data
 	 * channel locally, generate the offer, POST it through the remote
@@ -328,6 +346,8 @@ export class Session {
 			send: (msg) => this.send(msg),
 			canSend: () => this.transport !== undefined,
 			onTimeout: () => this.failByHeartbeat(),
+			intervalMs: Session.heartbeatTimingOverride?.intervalMs,
+			timeoutMs: Session.heartbeatTimingOverride?.timeoutMs,
 		});
 	}
 

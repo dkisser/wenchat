@@ -38,7 +38,8 @@ export const FILE_CHUNK_SIZE = 64 * 1024;
  * queue is what the old unthrottled loop blew up (100 MiB of frames piling up
  * before the event loop could flush → OOM). Note `bufferedAmount` does not
  * count SCTP's unacked retransmission buffer; a truly stalled link is still
- * bounded by the heartbeat, which kills a dead peer in ~4 s.
+ * bounded by the heartbeat, which kills a dead peer after ~15 s of total
+ * silence.
  */
 export const BUFFERED_AMOUNT_HIGH_WATER = 4 * 1024 * 1024;
 
@@ -90,13 +91,14 @@ const FILE_MAX_RETRANSMIT_MS = 30_000;
 const FILE_MAX_RETRANSMIT_ATTEMPTS = 5;
 
 /** PR-5 — how long the receiver waits after `file-end` for the sender's
- *  chunk-level retransmits to fill any gaps before validating. Covers
- *  the sender's first retransmit window (`FILE_INITIAL_RETRANSMIT_MS`)
- *  plus enough propagation headroom for a 130-chunk retransmit burst
- *  on the LAN. Constructor option `validationDelayMs` overrides this
- *  default; tests that don't exercise the recovery path pass 0 to
- *  keep the happy-path latency unchanged. */
-const DEFAULT_FILE_END_VALIDATION_DELAY_MS = 3_000;
+ *  chunk-level retransmits to fill any gaps before validating. The sender
+ *  pulls a still-missing chunk's retry forward to
+ *  `FILE_INITIAL_RETRANSMIT_MS` on every fresh missing-report, so this
+ *  window only needs to cover that initial delay plus delivery headroom
+ *  for the retransmit burst on a congested LAN. Constructor option
+ *  `validationDelayMs` overrides this default; tests that don't exercise
+ *  the recovery path pass 0 to keep the happy-path latency unchanged. */
+const DEFAULT_FILE_END_VALIDATION_DELAY_MS = 5_000;
 
 /**
  * PR-5 — default cap for the per-transfer unacked chunk bitmap.
@@ -307,7 +309,7 @@ export class FileReceiver {
 			 * retransmits to fill any gap before validating. Only used
 			 * when the post-file-end bitmap shows a gap (`expectedNext <
 			 * totalChunks`); transfers that already have every chunk
-			 * validate immediately. Default 3000 ms; tests pass 0 to
+			 * validate immediately. Default 5000 ms; tests pass 0 to
 			 * keep the happy path synchronous.
 			 */
 			validationDelayMs?: number;
@@ -771,9 +773,9 @@ export type FileSenderOptions = {
 	/**
 	 * Returns the current `SendChannel`, or `null` when no session is
 	 * active (transport swap in flight). Retransmit timers that fire
-	 * against a `null` channel are deferred to the next ACK-driven
-	 * reschedule; the per-chunk retry counter still advances so the
-	 * 5-attempt budget remains the source of truth.
+	 * against a `null` channel are re-armed at a fixed delay WITHOUT
+	 * consuming an attempt — the chunk never reached the wire, so the
+	 * 5-attempt budget only ticks on real sends.
 	 */
 	getChannel: () => SendChannel | null;
 	/**
@@ -913,9 +915,11 @@ export class FileSender {
 	 *     alone (the receiver hasn't told us anything about it).
 	 *
 	 * After reconciliation, every index still in `unackedIndices`
-	 * gets its retry timer (re)armed. The very first retransmit uses
-	 * the initial delay; subsequent ones exponentially back off up to
-	 * the cap. Five failed attempts on any one chunk → abandon.
+	 * gets its retry timer (re)armed. A chunk with a pending timer is
+	 * PULLED FORWARD to the initial delay (a fresh missing-report is the
+	 * receiver asking now — see `pullRetryForward`); the timer-driven
+	 * retries after a send exponentially back off up to the cap. Five
+	 * failed sends on any one chunk → abandon.
 	 */
 	noteChunkAck(payload: { transferId: string; bitmap: Uint8Array; lastIndex: number }): void {
 		const state = this.transfers.get(payload.transferId);
@@ -943,9 +947,13 @@ export class FileSender {
 			}
 		}
 
-		// (Re)arm retransmits for everything still unacked.
+		// (Re)arm retransmits for everything still unacked. A chunk that
+		// already has a pending timer is pulled forward to the initial
+		// delay — the fresh missing-report is the receiver asking NOW,
+		// and the receiver's post-file-end validation window is sized to
+		// that initial delay.
 		for (const i of state.unackedIndices.keys()) {
-			this.scheduleRetransmit(state, i);
+			this.pullRetryForward(state, i);
 		}
 
 		// If every chunk is now acked, the per-transfer state can be
@@ -1003,6 +1011,21 @@ export class FileSender {
 		state.unackedIndices.set(index, true);
 	}
 
+	private delayForAttempt(attempts: number): number {
+		return Math.min(this.initialRetransmitMs * 2 ** (attempts - 1), this.maxRetransmitMs);
+	}
+
+	/** Arm (or pull forward) the retry timer for `index` at `delay`. */
+	private armRetryTimer(state: SenderTransferState, index: number, delay: number): void {
+		const pending = state.retryTimers.get(index);
+		if (pending) clearTimeout(pending);
+		const timer = setTimeout(() => {
+			state.retryTimers.delete(index);
+			void this.fireRetransmit(state, index);
+		}, delay);
+		state.retryTimers.set(index, timer);
+	}
+
 	private scheduleRetransmit(state: SenderTransferState, index: number): void {
 		// Don't double-arm. If a timer is already pending for this
 		// chunk, the existing schedule is the source of truth.
@@ -1018,28 +1041,34 @@ export class FileSender {
 			return;
 		}
 		state.retryCounters.set(index, attempts);
+		this.armRetryTimer(state, index, this.delayForAttempt(attempts));
+	}
 
-		const delay = Math.min(this.initialRetransmitMs * 2 ** (attempts - 1), this.maxRetransmitMs);
-		const timer = setTimeout(() => {
-			state.retryTimers.delete(index);
-			void this.fireRetransmit(state, index);
-		}, delay);
-		state.retryTimers.set(index, timer);
+	/** PR-5 — a fresh missing-report pulls a pending retry forward to the
+	 *  initial delay, without consuming an attempt: the ACK proves the
+	 *  chunk is still wanted NOW, and waiting out a long backoff can miss
+	 *  the receiver's post-file-end validation window entirely (the bug the
+	 *  2 s initial delay introduced: a chunk on attempt ≥ 2 had a ≥ 4 s
+	 *  pending timer while the receiver validated at 3 s). Chunks with no
+	 *  pending timer arm through `scheduleRetransmit` as before. */
+	private pullRetryForward(state: SenderTransferState, index: number): void {
+		if (!state.retryTimers.has(index)) {
+			this.scheduleRetransmit(state, index);
+			return;
+		}
+		this.armRetryTimer(state, index, this.initialRetransmitMs);
 	}
 
 	private async fireRetransmit(state: SenderTransferState, index: number): Promise<void> {
 		const channel = this.getChannel();
 		if (!channel) {
-			// No live transport — defer. We re-arm the timer at the
-			// existing delay so the retry budget keeps advancing; the
-			// timer is harmless when there's no channel to send on.
-			// A future `noteChunkAck` (which can arrive over the same
-			// dead channel's control-plane? — no, the channel is gone)
-			// or a future sendFile call that brings the channel back
-			// will reschedule via noteChunkAck. To avoid waiting on
-			// the dead timer forever, just re-arm here so the cap
-			// doesn't stall the abandon path.
-			this.scheduleRetransmit(state, index);
+			// Mid-reconnect window: the chunk never reached the wire, so
+			// re-arm at the same delay WITHOUT consuming an attempt —
+			// burning the 5-try budget while disconnected could abandon a
+			// transfer the association would have recovered. Once a new
+			// session's channel arrives (swapSession continuity), the next
+			// fire retransmits for real.
+			this.armRetryTimer(state, index, this.delayForAttempt(state.retryCounters.get(index) ?? 1));
 			return;
 		}
 		const offset = index * FILE_CHUNK_SIZE;

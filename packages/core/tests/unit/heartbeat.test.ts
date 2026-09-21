@@ -49,7 +49,7 @@ describe("HeartbeatScheduler", () => {
 		}
 	});
 
-	it("ignores text/file messages — does not emit anything", () => {
+	it("does not reply to text/file messages — but counts them as inbound traffic", () => {
 		const h = makeHarness();
 		h.hb.handleIncoming({
 			type: "text",

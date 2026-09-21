@@ -13,7 +13,7 @@ import type { ByeReason } from "@wenchat/protocol";
 export type CloseReason =
 	/** pc went `disconnected`/`failed`, or the data channel died on its own. */
 	| "network"
-	/** pc still looks alive but no ping/pong landed inside the watchdog window. */
+	/** pc still looks alive but no inbound frame at all landed inside the watchdog window. */
 	| "heartbeat-timeout"
 	/** We quit the process (`/exit`). */
 	| "local-exit"

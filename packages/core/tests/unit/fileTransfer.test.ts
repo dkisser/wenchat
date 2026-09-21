@@ -766,14 +766,12 @@ describe("FileSender — chunk-level ACK + selective retransmit (PR-5)", () => {
 		maxRetransmitMs?: number;
 		maxRetransmitAttempts?: number;
 	}) {
-		const sentMessages: Message[] = [];
 		const resentChunks: Array<{ transferId: string; index: number; data: Uint8Array }> = [];
 		const abandoned: string[] = [];
 		let channel: SendChannel | null = null;
 
 		const sender = new FileSender({
 			getChannel: () => channel,
-			sendMessage: (m) => sentMessages.push(m),
 			onTransferAbandoned: (transferId) => abandoned.push(transferId),
 			initialRetransmitMs: opts?.initialRetransmitMs,
 			maxRetransmitMs: opts?.maxRetransmitMs,
@@ -782,7 +780,6 @@ describe("FileSender — chunk-level ACK + selective retransmit (PR-5)", () => {
 
 		return {
 			sender,
-			sentMessages,
 			resentChunks,
 			abandoned,
 			setChannel: (c: SendChannel | null) => {
@@ -931,6 +928,89 @@ describe("FileSender — chunk-level ACK + selective retransmit (PR-5)", () => {
 			bitmap: new Uint8Array([0xff]),
 			lastIndex: 7,
 		});
+		expect(h.abandoned).toEqual([]);
+	});
+
+	it("a fresh missing-report pulls a pending retry forward to the initial delay", async () => {
+		const h = makeSenderHarness({
+			initialRetransmitMs: 30,
+			maxRetransmitMs: 500,
+			maxRetransmitAttempts: 5,
+		});
+		const content = randomBytes(FILE_CHUNK_SIZE * 2);
+		const path = join(scratchDir, "pull-forward.bin");
+		await writeFile(path, content);
+		const channel = makeFakeChannel();
+		h.setChannel(channel);
+
+		const result = await h.sender.sendFile(path);
+
+		const resentIndices: number[] = [];
+		const originalSendBinary = channel.sendBinary.bind(channel);
+		channel.sendBinary = (frame: Uint8Array) => {
+			resentIndices.push(decodeFileChunkFrame(frame).index);
+			originalSendBinary(frame);
+		};
+
+		// Chunk 1 present (bit 1 set), chunk 0 missing (bit 0 clear). The
+		// first missing-report arms chunk 0 at attempt 1 → fires at ~30 ms,
+		// sends, then re-arms at the attempt-2 backoff (~60 ms).
+		const bitmap = new Uint8Array([0b00000010]);
+		h.sender.noteChunkAck({ transferId: result.transferId, bitmap, lastIndex: 1 });
+		await new Promise<void>((r) => setTimeout(r, 80));
+		expect(resentIndices).toEqual([0]);
+
+		// A FRESH missing-report must pull the pending attempt-2 timer
+		// (~60 ms away) forward to the initial delay (~30 ms). Without the
+		// pull-forward the second retransmit lands outside the 50 ms window
+		// below — the exact failure that made receivers declare transfers
+		// incomplete while the sender still had retry budget.
+		h.sender.noteChunkAck({ transferId: result.transferId, bitmap, lastIndex: 1 });
+		await new Promise<void>((r) => setTimeout(r, 50));
+		expect(resentIndices.filter((i) => i === 0).length).toBe(2);
+	});
+
+	it("a retry that fires with no channel re-arms without burning the attempt budget", async () => {
+		const h = makeSenderHarness({
+			initialRetransmitMs: 20,
+			maxRetransmitMs: 60,
+			maxRetransmitAttempts: 2,
+		});
+		const content = randomBytes(FILE_CHUNK_SIZE * 2);
+		const path = join(scratchDir, "nochan-rearm.bin");
+		await writeFile(path, content);
+		const channel = makeFakeChannel();
+
+		h.setChannel(channel);
+		const result = await h.sender.sendFile(path);
+		// The channel disappears (reconnect window) before any retry fires.
+		h.setChannel(null);
+
+		// Nothing acked → both chunks arm at attempt 1 (20 ms). Every 20 ms
+		// fire hits the no-channel branch: the old behavior CONSUMED AN
+		// ATTEMPT per fire (20 ms, 40 ms → abandoned by ~60 ms) even though
+		// nothing ever reached the wire. The fix re-arms at the same delay
+		// and leaves the budget untouched.
+		h.sender.noteChunkAck({
+			transferId: result.transferId,
+			bitmap: new Uint8Array(0),
+			lastIndex: 1,
+		});
+		await new Promise<void>((r) => setTimeout(r, 150));
+		expect(h.abandoned).toEqual([]);
+
+		// Channel returns → the next fire (~20 ms) retransmits both chunks
+		// for real as attempt 1. Had the budget burned during the outage,
+		// the transfer would have been abandoned long before this.
+		h.setChannel(channel);
+		const resentIndices: number[] = [];
+		const originalSendBinary = channel.sendBinary.bind(channel);
+		channel.sendBinary = (frame: Uint8Array) => {
+			resentIndices.push(decodeFileChunkFrame(frame).index);
+			originalSendBinary(frame);
+		};
+		await new Promise<void>((r) => setTimeout(r, 40));
+		expect(resentIndices.sort()).toEqual([0, 1]);
 		expect(h.abandoned).toEqual([]);
 	});
 });

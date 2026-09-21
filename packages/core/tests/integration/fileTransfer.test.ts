@@ -155,7 +155,7 @@ describe("core integration: file transfer", () => {
 		// genuinely still in flight when bob dies — otherwise the whole file
 		// lands in SCTP's retransmit queue before the kill lands and the
 		// send would "succeed" into the void. Alice notices via her
-		// heartbeat (~4 s), which now also closes her data channel.
+		// heartbeat (~15 s), which now also closes her data channel.
 		const sendPromise = alice.sendFile(sourcePath, { highWaterBytes: 64 * 1024 });
 		await sleep(200);
 		bob._forceCloseActivePc();

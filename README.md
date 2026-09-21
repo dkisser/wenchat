@@ -43,8 +43,9 @@ native mouse-selection mode.
   relay server
 - 🛡️ **DTLS in-transit** — link-layer encryption; the data channel
   itself carries plaintext frames
-- 💓 **Application-layer heartbeat** — 2 s ping / 4 s timeout with
-  auto-pong and automatic cleanup on link loss
+- 💓 **Application-layer heartbeat** — 2 s ping (suppressed while traffic
+  flows) / 15 s total-silence watchdog, with auto-pong and automatic
+  cleanup on link loss
 
 **Chat UX**
 
