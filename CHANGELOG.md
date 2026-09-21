@@ -24,6 +24,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **File transfer no longer drops the connection mid-transfer.** Under
+  congestion, the 200 ms file-chunk retransmit stacked on top of SCTP's
+  own retransmits and froze the send queue, and the 4 s heartbeat watchdog
+  only counted ping/pong as liveness — so it killed healthy connections
+  while chunks were still flowing (and the file had fully arrived). The
+  initial chunk retransmit delay is now 2 s (congestion recovery is SCTP's
+  job), any inbound frame re-arms the watchdog, pings are suppressed while
+  real traffic is flowing, and the timeout is 15 s.
+
 - **`sendFile` no longer resolves prematurely.** `Session.getSendChannel`
   was capturing the transport by value, so the `bufferedAmount`
   backpressure in `sendFile` saw a stale value; a 4 MiB file used to

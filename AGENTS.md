@@ -79,6 +79,7 @@ Feature-level implementation notes, kept out of this file on purpose — consult
 - `docs/devops/cli-subcommands.md` — CLI subcommand and upgrade behavior spec
 - `docs/devops/ui-rendering.md` — markdown rendering, clipboard, OSC 52, mouse invariants
 - `docs/devops/ci-release.md` — CI pipeline, release workflow, asset naming, versioning details
+- `docs/devops/known-issues.md` — diagnosed-but-unfixed defects (reconnect glare, werift T3 freeze) with their log signatures
 
 ## Domain model & decisions
 
